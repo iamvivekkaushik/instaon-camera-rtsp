@@ -29,4 +29,4 @@ EXPOSE 1554/tcp
 # Bind must be 0.0.0.0 for Docker/Dokku (binary default is 127.0.0.1).
 # Dokku (replaces CMD — include the binary name):
 #   dokku ps:set instaon-relay dockerfile-start-cmd 'dh-p2p --relay --cloud=instaon --type=0 --port=0.0.0.0:1554:554 --serial=YOUR_SERIAL'
-CMD ["dh-p2p"]
+ENTRYPOINT ["dh-p2p"]
