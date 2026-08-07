@@ -15,6 +15,16 @@ cd CameraStreamer
 
 Needs `Vendor/ffmpeg` and `Vendor/dh-p2p-bin`.
 
+### App icon + DMG
+
+```bash
+./scripts/package.sh
+```
+
+Produces:
+- `CameraStreamer.app` (with `Resources/AppIcon.icns`)
+- `dist/CameraStreamer-1.0.0.dmg` (drag to Applications)
+
 Rebuild tunnel binary:
 
 ```bash
@@ -56,5 +66,5 @@ The cloud knows the SN but the device is not online on that P2P server. Open liv
 ## Run dh-p2p
 
 ```
-./Vendor/dh-p2p-bin --relay -c instaon -t 0 -p 0:1555:554 2009011801001104
+./Vendor/dh-p2p-bin --relay -c instaon -t 0 -p 0:1555:554 -s YOUR_SERIAL
 ```

@@ -134,7 +134,7 @@ struct ContentView: View {
                 GroupBox {
                     VStack(alignment: .leading, spacing: 10) {
                         labeledField("InstaOn ID", accessibility: "Device serial") {
-                            TextField("2009011801001104", text: $settings.serial)
+                            TextField("Device serial", text: $settings.serial)
                                 .textFieldStyle(.roundedBorder)
                         }
                         labeledField("Username", accessibility: "Device username") {

@@ -26,7 +26,7 @@ from helpers import (
 
 
 def main(
-    serial, dtype=0, username=None, password="kaushik@2020", debug=False, cloud=DEFAULT_CLOUD
+    serial, dtype=0, username=None, password=None, debug=False, cloud=DEFAULT_CLOUD
 ):
     # Rebinds the module-level credentials as well, which UDP.request reads.
     main_server, main_port = set_cloud(cloud)
@@ -414,7 +414,7 @@ if __name__ == "__main__":
             args.serial,
             args.type,
             args.username,
-            args.password or "kaushik@2020",
+            args.password,
             args.debug,
             args.cloud,
         )

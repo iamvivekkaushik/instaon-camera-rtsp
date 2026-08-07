@@ -71,7 +71,7 @@ enum StreamURLBuilder {
     }
 
     private static func percentEncode(_ value: String) -> String {
-        // Must encode @ in password (e.g. kaushik@2020 → kaushik%402020) so it
+        // Must encode @ in password (e.g. pass@word → pass%40word) so it
         // is not parsed as userinfo/host separators.
         var allowed = CharacterSet.urlUserAllowed
         allowed.remove(charactersIn: ":@/?#[]")

@@ -18,7 +18,6 @@ final class AppSettings: ObservableObject {
         static let streamMode = "cs.streamMode"
         static let gridCapacity = "cs.gridCapacity"
         static let showLogs = "cs.showLogs"
-        static let hasLaunched = "cs.hasLaunched"
     }
 
     @Published var serial: String {
@@ -61,10 +60,7 @@ final class AppSettings: ObservableObject {
     }
 
     private init() {
-        let firstLaunch = !defaults.bool(forKey: Key.hasLaunched)
-        defaults.set(true, forKey: Key.hasLaunched)
-
-        serial = defaults.string(forKey: Key.serial) ?? (firstLaunch ? "2009011801001104" : "")
+        serial = defaults.string(forKey: Key.serial) ?? ""
         username = defaults.string(forKey: Key.username) ?? "admin"
         password = defaults.string(forKey: Key.password) ?? ""
         subtype = defaults.object(forKey: Key.subtype) as? Int ?? 1

@@ -1,6 +1,7 @@
 .build/
 .swiftpm/
 CameraStreamer.app/
+dist/
 Vendor/ffmpeg
 Vendor/ffprobe
 Vendor/dh-p2p-bin

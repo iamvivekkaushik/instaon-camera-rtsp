@@ -812,11 +812,14 @@ final class StreamEngine: ObservableObject {
         try server.start()
         appendLog("Local HLS ch\(channel) http://127.0.0.1:\(server.port)/index.m3u8")
 
-        // Remux H.264 from the tunnel (no re-encode). A 1MB probesize starves on
-        // slow P2P relay — VLC plays the same URL while ffmpeg never starts HLS.
+        // Light local re-encode so HLS gets a keyframe every ~2s. `-c copy` over
+        // P2P often stops cutting segments when GOPs/gaps arrive late — AVPlayer
+        // then plays the ~12s playlist window and freezes.
         let isMain = subtype == 0
+        let maxRate = isMain ? "4000k" : "1500k"
+        let bufSize = isMain ? "2000k" : "750k"
         appendLog(
-            "HLS remux ch\(channel): copy → mpegts (\(isMain ? "main" : "sub"), small probe)"
+            "HLS encode ch\(channel): libx264 ultrafast crf=23 maxrate=\(maxRate) (\(isMain ? "main" : "sub"))"
         )
 
         let process = Process()
@@ -828,18 +831,27 @@ final class StreamEngine: ObservableObject {
             "-fflags", "+genpts+discardcorrupt+nobuffer",
             "-flags", "low_delay",
             "-use_wallclock_as_timestamps", "1",
-            // Live P2P: start after a tiny probe, not 1MB of RTP.
             "-analyzeduration", "500000",
             "-probesize", "65536",
             "-max_delay", "500000",
             "-i", rtspURL.absoluteString,
             "-an",
             "-map", "0:v:0",
-            "-c:v", "copy",
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-tune", "zerolatency",
+            "-pix_fmt", "yuv420p",
+            "-g", "48",
+            "-keyint_min", "48",
+            "-sc_threshold", "0",
+            "-force_key_frames", "expr:gte(t,n_forced*2)",
+            "-crf", "23",
+            "-maxrate", maxRate,
+            "-bufsize", bufSize,
             "-f", "hls",
             "-hls_time", "2",
-            "-hls_list_size", "6",
-            "-hls_flags", "delete_segments+append_list+independent_segments+program_date_time",
+            "-hls_list_size", "8",
+            "-hls_flags", "delete_segments+append_list+omit_endlist+independent_segments+program_date_time",
             "-hls_segment_type", "mpegts",
             "-hls_segment_filename", segmentPattern,
             "-hls_allow_cache", "0",

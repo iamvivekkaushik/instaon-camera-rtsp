@@ -28,6 +28,9 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/CameraStreamer"
 cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
+if [[ -f "$ROOT/Resources/AppIcon.icns" ]]; then
+  cp "$ROOT/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+fi
 cp "$ROOT/Vendor/ffmpeg" "$APP/Contents/Resources/ffmpeg"
 cp "$ROOT/Vendor/dh-p2p-bin" "$APP/Contents/Resources/dh-p2p-bin"
 chmod +x "$APP/Contents/MacOS/CameraStreamer" \
