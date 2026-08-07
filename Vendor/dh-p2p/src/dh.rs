@@ -218,7 +218,19 @@ pub async fn p2p_handshake(
     socket2
         .dh_request(format!("/info/device/{}", serial).as_ref(), None, &mut cseq)
         .await;
-    let info_res = socket2.dh_read_raw().await;
+    let info_res = match time::timeout(time::Duration::from_secs(10), socket2.dh_read_raw()).await {
+        Ok(r) => r,
+        Err(_) => {
+            println!("info/device timed out — continuing without salt");
+            DHResponse {
+                version: "HTTP/1.1".into(),
+                code: 598,
+                status: "info/device timed out".into(),
+                headers: HashMap::new(),
+                body: None,
+            }
+        }
+    };
     let mut randsalt = String::new();
     if info_res.code < 300 {
         if let Some(body) = &info_res.body {
@@ -236,14 +248,21 @@ pub async fn p2p_handshake(
     }
 
     socket.dh_request("/online/relay", None, &mut cseq).await;
-    let relay = socket
-        .dh_read()
-        .await?
-        .body
-        .ok_or_else(|| "missing body for /online/relay".to_string())?
-        .get("body/Address")
-        .cloned()
-        .ok_or_else(|| "missing body/Address".to_string())?;
+    let relay = match time::timeout(time::Duration::from_secs(10), socket.dh_read()).await {
+        Ok(Ok(res)) => res
+            .body
+            .ok_or_else(|| "missing body for /online/relay".to_string())?
+            .get("body/Address")
+            .cloned()
+            .ok_or_else(|| "missing body/Address".to_string())?,
+        Ok(Err(e)) => return Err(e),
+        Err(_) => {
+            return Err(
+                "online/relay timed out — cloud busy or stale P2P session; kill leftover dh-p2p and retry"
+                    .to_string(),
+            );
+        }
+    };
 
     let cid: [u8; 8] = rand::random();
     let local_plain = format!("127.0.0.1:{}", socket.local_addr().unwrap().port());

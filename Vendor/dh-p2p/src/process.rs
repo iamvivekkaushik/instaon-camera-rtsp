@@ -203,7 +203,9 @@ pub async fn dh_reader(
                 // forward bytes in order — never filter on the first byte.
                 payload_packets += 1;
                 payload_bytes += p.data.len() as u64;
-                if payload_packets <= 12 || payload_packets % 200 == 0 {
+                // Log early packets, then every 50, so slow-relay progress
+                // is visible in the app (UI filters on "payload #").
+                if payload_packets <= 12 || payload_packets % 50 == 0 {
                     println!(
                         "PTCP payload #{} len={} realm={:08x} head={:02x} total_bytes={}",
                         payload_packets,

@@ -658,7 +658,8 @@ final class StreamEngine: ObservableObject {
                     appendLog(
                         "Retrying channels \(remaining.map(String.init).joined(separator: ",")) with alternate stream…"
                     )
-                    try? await Task.sleep(nanoseconds: 400_000_000)
+                    // Let PTCP DISC finish so the next Bind gets CONN.
+                    try? await Task.sleep(nanoseconds: 1_500_000_000)
                 }
             }
 
@@ -702,7 +703,8 @@ final class StreamEngine: ObservableObject {
         }
 
         var tracks = launches.map { Track(item: $0, firstSegmentAt: nil, done: false) }
-        let deadline = Date().addingTimeInterval(50)
+        // Copy-remux usually settles in a few seconds; keep headroom for slow relay.
+        let deadline = Date().addingTimeInterval(75)
         var anyPlaying = false
 
         while Date() < deadline, tracks.contains(where: { !$0.done }) {
@@ -792,13 +794,11 @@ final class StreamEngine: ObservableObject {
         try server.start()
         appendLog("Local HLS ch\(channel) http://127.0.0.1:\(server.port)/index.m3u8")
 
-        // Quality targets (local re-encode for AVPlayer). Main keeps resolution/fps;
-        // Sub is lighter for P2P bitrates. Preserve both for single- and multi-view.
+        // Remux H.264 from the tunnel (no re-encode). A 1MB probesize starves on
+        // slow P2P relay — VLC plays the same URL while ffmpeg never starts HLS.
         let isMain = subtype == 0
-        let maxRate = isMain ? "6000k" : "2000k"
-        let bufSize = isMain ? "4000k" : "1500k"
         appendLog(
-            "HLS encode ch\(channel): libx264 veryfast crf=18 maxrate=\(maxRate) (\(isMain ? "main" : "sub"))"
+            "HLS remux ch\(channel): copy → mpegts (\(isMain ? "main" : "sub"), small probe)"
         )
 
         let process = Process()
@@ -810,26 +810,14 @@ final class StreamEngine: ObservableObject {
             "-fflags", "+genpts+discardcorrupt+nobuffer",
             "-flags", "low_delay",
             "-use_wallclock_as_timestamps", "1",
-            "-analyzeduration", "2000000",
-            "-probesize", "1000000",
+            // Live P2P: start after a tiny probe, not 1MB of RTP.
+            "-analyzeduration", "500000",
+            "-probesize", "65536",
+            "-max_delay", "500000",
             "-i", rtspURL.absoluteString,
             "-an",
             "-map", "0:v:0",
-            "-c:v", "libx264",
-            "-preset", "veryfast",
-            "-tune", "zerolatency",
-            "-profile:v", "main",
-            "-level", "4.1",
-            "-pix_fmt", "yuv420p",
-            // ~2s GOP matches hls_time; force keyframes at segment boundaries.
-            "-g", "50",
-            "-keyint_min", "25",
-            "-sc_threshold", "0",
-            "-force_key_frames", "expr:gte(t,n_forced*2)",
-            // Constrained CRF: quality first, cap peak (local re-encode).
-            "-crf", "18",
-            "-maxrate", maxRate,
-            "-bufsize", bufSize,
+            "-c:v", "copy",
             "-f", "hls",
             "-hls_time", "2",
             "-hls_list_size", "6",
@@ -858,7 +846,8 @@ final class StreamEngine: ObservableObject {
                     .trimmingCharacters(in: .whitespacesAndNewlines),
                    !line.isEmpty {
                     let engine = self
-                    await MainActor.run { engine?.appendLog("[ch\(channel)] \(line)") }
+                    let safe = Self.redactRTSPCredentials(line)
+                    await MainActor.run { engine?.appendLog("[ch\(channel)] \(safe)") }
                 }
             }
         }
@@ -1040,11 +1029,16 @@ final class StreamEngine: ObservableObject {
     }
 
     private func redact(_ url: URL) -> String {
-        guard var comps = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
-            return url.absoluteString
-        }
-        if comps.password != nil { comps.password = "***" }
-        return comps.string ?? url.absoluteString
+        Self.redactRTSPCredentials(url.absoluteString)
+    }
+
+    nonisolated private static func redactRTSPCredentials(_ text: String) -> String {
+        // ffmpeg stderr often echoes the full input URL including password.
+        text.replacingOccurrences(
+            of: #"rtsp://([^:@/]+):([^@/]+)@"#,
+            with: "rtsp://$1:***@",
+            options: .regularExpression
+        )
     }
 
     nonisolated static func resolveFFmpegPath() -> String? {

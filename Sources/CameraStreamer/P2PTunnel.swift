@@ -93,6 +93,14 @@ final class P2PTunnel {
         stop()
         try? await Task.sleep(nanoseconds: 250_000_000)
 
+        // Stale dh-p2p children (app crash / failed stop) keep /p2p-channel busy —
+        // the device allows only one session, so a new handshake hangs after probe.
+        let killed = await Self.killOrphanTunnels(serial: serial)
+        if killed > 0 {
+            onLog?("Cleared \(killed) stale dh-p2p process(es) for \(serial)")
+            try? await Task.sleep(nanoseconds: 800_000_000)
+        }
+
         guard let binary = Self.resolveBinaryPath() else {
             throw NSError(
                 domain: "CameraStreamer",
@@ -151,7 +159,9 @@ final class P2PTunnel {
                 || lower.contains("stuck on 100")
                 || lower.contains("waiting for p2p-channel")
                 || lower.contains("ptcp sync response missing")
-                || lower.contains("invalid ptcp magic") {
+                || lower.contains("invalid ptcp magic")
+                || lower.contains("online/relay timed out")
+                || lower.contains("stale p2p") {
                 detail +=
                     " Device did not complete P2P/PTCP — close live view in gCMOB, wait ~10s, retry. Avoid a second manual tunnel on the same SN."
             } else if lower.contains("404 p2p-channel") {
@@ -257,8 +267,12 @@ final class P2PTunnel {
                 || lower.contains("timed out")
                 || lower.contains("waiting for p2p")
                 || lower.contains("p2p-channel")
+                || lower.contains("online/relay")
+                || lower.contains("info/device")
                 || lower.contains("relay agent")
                 || lower.contains("close gcmob")
+                || lower.contains("cleared")
+                || lower.contains("stale")
                 || lower.contains("accepted connection")
                 || lower.contains("bind failed")
                 || lower.contains("address already")
@@ -276,6 +290,75 @@ final class P2PTunnel {
                 onLog?(text)
             }
         }
+    }
+
+    /// Kill leftover `dh-p2p` / `dh-p2p-bin` processes for this serial (or any
+    /// listener on the usual local ports). Returns how many were signaled.
+    nonisolated private static func killOrphanTunnels(serial: String) async -> Int {
+        await Task.detached(priority: .utility) {
+            let sn = serial.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !sn.isEmpty else { return 0 }
+
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/bin/ps")
+            task.arguments = ["-axo", "pid=,command="]
+            let out = Pipe()
+            task.standardOutput = out
+            task.standardError = Pipe()
+            do { try task.run() } catch { return 0 }
+            task.waitUntilExit()
+            let data = out.fileHandleForReading.readDataToEndOfFile()
+            guard let text = String(data: data, encoding: .utf8) else { return 0 }
+
+            var pids = Set<Int32>()
+            for line in text.split(whereSeparator: \.isNewline) {
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                guard !trimmed.isEmpty else { continue }
+                let parts = trimmed.split(maxSplits: 1, whereSeparator: \.isWhitespace)
+                guard parts.count == 2,
+                      let pid = Int32(parts[0]),
+                      pid > 1 else { continue }
+                let cmd = String(parts[1])
+                let isTunnel =
+                    cmd.contains("dh-p2p-bin")
+                    || cmd.contains("/dh-p2p ")
+                    || cmd.hasSuffix("/dh-p2p")
+                    || cmd.contains("dh-p2p --")
+                guard isTunnel else { continue }
+                if cmd.contains(sn) {
+                    pids.insert(pid)
+                }
+            }
+
+            // Also free preferred local ports if something else still listens.
+            for port in 1554...1565 {
+                let lsof = Process()
+                lsof.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
+                lsof.arguments = ["-nP", "-t", "-iTCP:\(port)", "-sTCP:LISTEN"]
+                let pipe = Pipe()
+                lsof.standardOutput = pipe
+                lsof.standardError = Pipe()
+                do { try lsof.run() } catch { continue }
+                lsof.waitUntilExit()
+                let raw = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                for token in raw.split(whereSeparator: \.isNewline) {
+                    if let pid = Int32(token.trimmingCharacters(in: .whitespaces)), pid > 1 {
+                        pids.insert(pid)
+                    }
+                }
+            }
+
+            for pid in pids {
+                kill(pid, SIGTERM)
+            }
+            if !pids.isEmpty {
+                usleep(400_000)
+                for pid in pids {
+                    kill(pid, SIGKILL)
+                }
+            }
+            return pids.count
+        }.value
     }
 
     nonisolated private static func firstFreePort(startingAt start: Int) async -> Int {
