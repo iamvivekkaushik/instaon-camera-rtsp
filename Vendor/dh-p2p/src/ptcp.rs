@@ -59,11 +59,11 @@ pub enum PTCPBody {
 }
 
 pub struct PTCPPacket {
-    sent: u32,
-    recv: u32,
-    pid: u32,
+    pub sent: u32,
+    pub recv: u32,
+    pub pid: u32,
     pub lmid: u32,
-    rmid: u32,
+    pub rmid: u32,
     pub body: PTCPBody,
 }
 
@@ -353,9 +353,11 @@ impl PTCPSession {
         self.sent += body.len() as u32;
 
         self.id += 1;
+        // Give Empty ACKs unique pids too. Reusing pid across RTP ACKs makes
+        // some relay agents drop the datagram as a duplicate — window freezes
+        // after the first ~8KiB of interleaved media.
         self.count += match body {
             PTCPBody::Sync => 0,
-            PTCPBody::Empty => 0,
             _ => 1,
         };
 
@@ -370,9 +372,11 @@ impl PTCPSession {
     }
 
     pub fn recv(&mut self, packet: PTCPPacket) -> PTCPPacket {
-        // Advance local recv window by the body length we actually accepted.
-        // Payload length includes the 12-byte 0x10 realm header (not just RTP).
-        self.recv += packet.body.len() as u32;
+        // Prefer peer seq (sent + body) so a lost earlier datagram cannot leave
+        // our cumulative recv permanently behind the agent's send cursor.
+        let via_seq = packet.sent.wrapping_add(packet.body.len() as u32);
+        let via_add = self.recv.wrapping_add(packet.body.len() as u32);
+        self.recv = cmp::max(via_seq, via_add);
         self.rmid = packet.lmid;
 
         packet

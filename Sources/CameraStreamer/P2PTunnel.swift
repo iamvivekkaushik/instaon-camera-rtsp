@@ -93,12 +93,13 @@ final class P2PTunnel {
         stop()
         try? await Task.sleep(nanoseconds: 250_000_000)
 
+        onLog?("Preparing tunnel (clearing stale dh-p2p if any)…")
         // Stale dh-p2p children (app crash / failed stop) keep /p2p-channel busy —
         // the device allows only one session, so a new handshake hangs after probe.
         let killed = await Self.killOrphanTunnels(serial: serial)
         if killed > 0 {
             onLog?("Cleared \(killed) stale dh-p2p process(es) for \(serial)")
-            try? await Task.sleep(nanoseconds: 800_000_000)
+            try? await Task.sleep(nanoseconds: 500_000_000)
         }
 
         guard let binary = Self.resolveBinaryPath() else {
@@ -292,21 +293,31 @@ final class P2PTunnel {
         }
     }
 
-    /// Kill leftover `dh-p2p` / `dh-p2p-bin` processes for this serial (or any
-    /// listener on the usual local ports). Returns how many were signaled.
+    /// Kill leftover `dh-p2p` / `dh-p2p-bin` processes for this serial.
+    /// Kept fast: one `pgrep`, no per-port `lsof` (those can hang for minutes on macOS).
     nonisolated private static func killOrphanTunnels(serial: String) async -> Int {
         await Task.detached(priority: .utility) {
             let sn = serial.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !sn.isEmpty else { return 0 }
 
             let task = Process()
-            task.executableURL = URL(fileURLWithPath: "/bin/ps")
-            task.arguments = ["-axo", "pid=,command="]
+            task.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+            task.arguments = ["-lf", "dh-p2p"]
             let out = Pipe()
             task.standardOutput = out
             task.standardError = Pipe()
             do { try task.run() } catch { return 0 }
-            task.waitUntilExit()
+
+            // Bound wait — never block Start on a wedged pgrep.
+            let deadline = Date().addingTimeInterval(2)
+            while task.isRunning, Date() < deadline {
+                usleep(50_000)
+            }
+            if task.isRunning {
+                task.terminate()
+                return 0
+            }
+
             let data = out.fileHandleForReading.readDataToEndOfFile()
             guard let text = String(data: data, encoding: .utf8) else { return 0 }
 
@@ -315,36 +326,24 @@ final class P2PTunnel {
                 let trimmed = line.trimmingCharacters(in: .whitespaces)
                 guard !trimmed.isEmpty else { continue }
                 let parts = trimmed.split(maxSplits: 1, whereSeparator: \.isWhitespace)
-                guard parts.count == 2,
-                      let pid = Int32(parts[0]),
-                      pid > 1 else { continue }
-                let cmd = String(parts[1])
+                guard parts.count >= 1, let pid = Int32(parts[0]), pid > 1 else { continue }
+                let cmd = parts.count > 1 ? String(parts[1]) : ""
                 let isTunnel =
                     cmd.contains("dh-p2p-bin")
-                    || cmd.contains("/dh-p2p ")
-                    || cmd.hasSuffix("/dh-p2p")
+                    || cmd.contains("/dh-p2p")
                     || cmd.contains("dh-p2p --")
+                    || cmd.contains("dh-p2p ")
                 guard isTunnel else { continue }
-                if cmd.contains(sn) {
+                // Match this serial when present; also reap obviously-orphaned
+                // listeners that still hold a local tunnel port.
+                if cmd.contains(sn)
+                    || cmd.contains(":1554:")
+                    || cmd.contains(":1555:")
+                    || cmd.contains(":1556:")
+                    || cmd.contains(":1557:")
+                    || cmd.contains(":1558:")
+                {
                     pids.insert(pid)
-                }
-            }
-
-            // Also free preferred local ports if something else still listens.
-            for port in 1554...1565 {
-                let lsof = Process()
-                lsof.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
-                lsof.arguments = ["-nP", "-t", "-iTCP:\(port)", "-sTCP:LISTEN"]
-                let pipe = Pipe()
-                lsof.standardOutput = pipe
-                lsof.standardError = Pipe()
-                do { try lsof.run() } catch { continue }
-                lsof.waitUntilExit()
-                let raw = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-                for token in raw.split(whereSeparator: \.isNewline) {
-                    if let pid = Int32(token.trimmingCharacters(in: .whitespaces)), pid > 1 {
-                        pids.insert(pid)
-                    }
                 }
             }
 
@@ -352,7 +351,7 @@ final class P2PTunnel {
                 kill(pid, SIGTERM)
             }
             if !pids.isEmpty {
-                usleep(400_000)
+                usleep(300_000)
                 for pid in pids {
                     kill(pid, SIGKILL)
                 }

@@ -525,14 +525,17 @@ final class StreamEngine: ObservableObject {
         }
 
         let clouds = ["instaon"]
-        // Prefer UI stream choice (Main=0 / Sub=1); fall back to the other if HLS fails.
+        // Prefer the UI stream choice; fall back to the other if HLS fails.
+        // (Main can hang DESCRIBE on some NVRs — fallback restarts the tunnel.)
         var subtypeOrder = [subtype]
         let alternate = subtype == 0 ? 1 : 0
         if !subtypeOrder.contains(alternate) {
             subtypeOrder.append(alternate)
         }
         if subtype == 0 {
-            appendLog("Using Main stream for quality; will fall back to Sub if Main fails over the tunnel")
+            appendLog("Using Main stream (will fall back to Sub if Main fails over the tunnel)")
+        } else {
+            appendLog("Using Sub stream (will fall back to Main if Sub fails)")
         }
 
         if channels.count > 1 {
@@ -542,6 +545,7 @@ final class StreamEngine: ObservableObject {
         }
 
         let tag = relay ? "P2P relay" : "P2P"
+        appendLog("Opening P2P tunnel (\(tag))…")
 
         for cloud in clouds {
             do {
@@ -580,8 +584,13 @@ final class StreamEngine: ObservableObject {
 
             for sub in subtypeOrder where !remaining.isEmpty {
                 if !tunnel.isRunning {
-                    appendLog("Tunnel exited mid-start")
-                    break
+                    appendLog("Tunnel exited mid-start — restarting…")
+                    do {
+                        try await tunnel.start(serial: serial, relay: relay, cloud: cloud)
+                    } catch {
+                        appendLog("Tunnel restart failed: \(error.localizedDescription)")
+                        break
+                    }
                 }
 
                 let port = tunnel.localPort
@@ -658,8 +667,17 @@ final class StreamEngine: ObservableObject {
                     appendLog(
                         "Retrying channels \(remaining.map(String.init).joined(separator: ",")) with alternate stream…"
                     )
-                    // Let PTCP DISC finish so the next Bind gets CONN.
-                    try? await Task.sleep(nanoseconds: 1_500_000_000)
+                    // Hung Main/Sub leaves the PTCP realm unusable — full tunnel restart.
+                    stopAllPipelines()
+                    tunnel.stop()
+                    try? await Task.sleep(nanoseconds: 1_200_000_000)
+                    do {
+                        try await tunnel.start(serial: serial, relay: relay, cloud: cloud)
+                        try? await Task.sleep(nanoseconds: 300_000_000)
+                    } catch {
+                        appendLog("Tunnel restart for fallback failed: \(error.localizedDescription)")
+                        break
+                    }
                 }
             }
 

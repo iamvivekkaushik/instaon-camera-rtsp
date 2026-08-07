@@ -28,6 +28,25 @@ async fn ptcp_send(
     socket.ptcp_request(p).await;
 }
 
+/// ACK under the wire lock immediately after applying `recv`, so a concurrent
+/// Data/Heartbeat cannot advertise a stale window mid-update.
+async fn ptcp_recv_and_ack(
+    session: &Arc<Mutex<PTCPSession>>,
+    wire: &Arc<AsyncMutex<()>>,
+    socket: &Arc<UdpSocket>,
+    packet: crate::ptcp::PTCPPacket,
+) -> crate::ptcp::PTCPPacket {
+    let _wire = wire.lock().await;
+    let packet = session.lock().unwrap().recv(packet);
+    let p = session.lock().unwrap().send(PTCPBody::Empty);
+    socket.ptcp_request(p).await;
+    // Duplicate ACK: Empty ACKs are tiny UDP datagrams and loss freezes the
+    // agent's ~8KiB send window after PLAY (RTP stops around payload #12).
+    let p2 = session.lock().unwrap().send(PTCPBody::Empty);
+    socket.ptcp_request(p2).await;
+    packet
+}
+
 /**
  * Read data from the channel and write it back to the client
  */
@@ -104,6 +123,9 @@ pub async fn dh_writer(
 
         match ev {
             PTCPEvent::Heartbeat => {
+                // Heartbeat advertises current recv; also send a pure Empty so
+                // agents that only advance their window on Empty still unlock.
+                ptcp_send(&session, &wire, &socket, PTCPBody::Empty).await;
                 ptcp_send(&session, &wire, &socket, PTCPBody::Heartbeat).await;
             }
             PTCPEvent::Connect(realm) => {
@@ -139,6 +161,39 @@ pub async fn dh_writer(
     }
 }
 
+fn forward_payload(
+    channels: &Arc<Mutex<HashMap<u32, mpsc::UnboundedSender<Vec<u8>>>>>,
+    p: PTCPPayload,
+    payload_packets: &mut u64,
+    payload_bytes: &mut u64,
+) {
+    *payload_packets += 1;
+    *payload_bytes += p.data.len() as u64;
+    // Keep the hot path quiet — println through a full Swift pipe stalls ACKs.
+    if *payload_packets <= 8 || *payload_packets % 100 == 0 {
+        println!(
+            "PTCP payload #{} len={} realm={:08x} head={:02x} total_bytes={}",
+            *payload_packets,
+            p.data.len(),
+            p.realm,
+            p.data.first().copied().unwrap_or(0),
+            *payload_bytes
+        );
+    }
+
+    let tx = {
+        let map = channels.lock().unwrap();
+        map.get(&p.realm).cloned()
+    };
+    if let Some(tx) = tx {
+        if tx.send(p.data).is_err() {
+            println!("Realm {:08x} unavailable", p.realm);
+        }
+    } else {
+        println!("Payload for unknown realm {:08x}", p.realm);
+    }
+}
+
 /**
  * Read data from devices and send it to clients
  */
@@ -160,7 +215,7 @@ pub async fn dh_reader(
 
         // Peer Empty ACKs: only refresh rmid, no counter / no reply.
         if let PTCPBody::Empty = packet.body {
-            session.lock().unwrap().recv(packet);
+            session.lock().unwrap().note_peer_lmid(packet.lmid);
             continue;
         }
 
@@ -168,7 +223,6 @@ pub async fn dh_reader(
         // ptcp.sent at 0. Counting those 4 bytes as received and Empty-ACKing
         // them inflates our recv window past peer.sent. After PLAY the agent
         // stops delivering interleaved RTP once the windows disagree.
-        // Do not reply Sync→Sync (session reset storm); ignore after handshake.
         if let PTCPBody::Sync = packet.body {
             let lmid = packet.lmid;
             session.lock().unwrap().note_peer_lmid(lmid);
@@ -176,13 +230,7 @@ pub async fn dh_reader(
             continue;
         }
 
-        // Update recv window first, then ACK under the wire lock.
-        let packet = session.lock().unwrap().recv(packet);
-
-        // Immediate flow-control ACK: peer only releases its send window when
-        // our advertised recv climbs. Wire lock keeps Data/HB from overtaking
-        // a stale-sent ACK (reorder freezes media after the first RTP blob).
-        ptcp_send(&session, &wire, &socket, PTCPBody::Empty).await;
+        let packet = ptcp_recv_and_ack(&session, &wire, &socket, packet).await;
 
         match packet.body {
             PTCPBody::Status(realm, status) => {
@@ -198,37 +246,7 @@ pub async fn dh_reader(
                 }
             }
             PTCPBody::Payload(p) => {
-                // Interleaved RTP over RTSP is a raw TCP byte stream inside PTCP.
-                // Frames may start mid-payload (not always with '$' / 0x24); always
-                // forward bytes in order — never filter on the first byte.
-                payload_packets += 1;
-                payload_bytes += p.data.len() as u64;
-                // Log early packets, then every 50, so slow-relay progress
-                // is visible in the app (UI filters on "payload #").
-                if payload_packets <= 12 || payload_packets % 50 == 0 {
-                    println!(
-                        "PTCP payload #{} len={} realm={:08x} head={:02x} total_bytes={}",
-                        payload_packets,
-                        p.data.len(),
-                        p.realm,
-                        p.data.first().copied().unwrap_or(0),
-                        payload_bytes
-                    );
-                }
-
-                let tx = {
-                    let map = channels.lock().unwrap();
-                    map.get(&p.realm).cloned()
-                };
-                if let Some(tx) = tx {
-                    // Unbounded local queue: never drop after ACKing — a drop
-                    // corrupts the interleaved RTP TCP bitstream for ffmpeg/VLC.
-                    if tx.send(p.data).is_err() {
-                        println!("Realm {:08x} unavailable", p.realm);
-                    }
-                } else {
-                    println!("Payload for unknown realm {:08x}", p.realm);
-                }
+                forward_payload(&channels, p, &mut payload_packets, &mut payload_bytes);
             }
             PTCPBody::Heartbeat => {
                 other_packets += 1;

@@ -178,8 +178,10 @@ async fn main() {
 
     let hb_tx = dh_tx.clone();
     tokio::spawn(async move {
+        // 1s keeps the relay window refreshed; 5s was enough for control but
+        // too slow once interleaved RTP filled the ~8KiB agent send window.
         loop {
-            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             let _ = hb_tx.send(PTCPEvent::Heartbeat).await;
         }
     });

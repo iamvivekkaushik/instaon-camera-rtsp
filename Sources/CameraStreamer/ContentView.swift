@@ -587,6 +587,22 @@ struct ContentView: View {
         focusedChannel = preferred
         statusMessage = "Starting \(settings.streamMode.rawValue) for \(channels.count) channel(s)…"
 
+        let statusTask = Task { @MainActor in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 400_000_000)
+                switch stream.state {
+                case .tunneling:
+                    statusMessage = "Opening P2P tunnel…"
+                case .probing(let url):
+                    statusMessage = "Connecting stream… \(url)"
+                case .starting:
+                    statusMessage = "Starting \(settings.streamMode.rawValue) for \(channels.count) channel(s)…"
+                case .playing, .failed, .idle:
+                    return
+                }
+            }
+        }
+
         await stream.start(
             device: target,
             username: settings.username,
@@ -595,6 +611,7 @@ struct ContentView: View {
             subtype: settings.subtype,
             preferredChannel: preferred
         )
+        statusTask.cancel()
 
         switch stream.state {
         case .playing:
