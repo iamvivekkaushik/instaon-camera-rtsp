@@ -162,6 +162,44 @@ fn get_auth(username: &str, key: &[u8], nonce: u32, randsalt: &str, payload: &st
     )
 }
 
+/// Send PTCP Sync and wait for a Sync reply, skipping stray HTTP/UDP junk
+/// (common when a late relay-channel ack lands on the agent socket).
+async fn ptcp_sync_handshake(
+    socket: &UdpSocket,
+    session: &mut PTCPSession,
+) -> Result<crate::ptcp::PTCPPacket, String> {
+    socket
+        .ptcp_request(session.send(PTCPBody::Sync))
+        .await;
+
+    let deadline = time::Instant::now() + time::Duration::from_secs(8);
+    while time::Instant::now() < deadline {
+        let slice = deadline.saturating_duration_since(time::Instant::now());
+        if slice.is_zero() {
+            break;
+        }
+        match time::timeout(slice.min(time::Duration::from_secs(2)), socket.ptcp_read()).await {
+            Ok(Some(pkt)) if matches!(pkt.body, PTCPBody::Sync) => {
+                return Ok(pkt);
+            }
+            Ok(Some(pkt)) => {
+                println!("Ignoring non-Sync PTCP during handshake: {:?}", pkt.body);
+            }
+            Ok(None) => {
+                // parse error (e.g. HTTP leftover) — keep waiting for real Sync
+            }
+            Err(_) => {
+                // brief quiet period; resend Sync once more
+                println!("PTCP Sync wait quiet; resending Sync");
+                socket
+                    .ptcp_request(session.send(PTCPBody::Sync))
+                    .await;
+            }
+        }
+    }
+    Err("PTCP Sync response missing".to_string())
+}
+
 pub async fn p2p_handshake(
     socket: UdpSocket,
     serial: String,
@@ -412,6 +450,10 @@ pub async fn p2p_handshake(
         .await
         .map_err(|e| format!("connect device: {e}"))?;
 
+    // relay-channel goes to the main cloud — read its HTTP ack *before*
+    // switching the UDP peer to the agent, or a late 37-byte
+    // `<body><version>…</version></body>` reply is mistaken for PTCP Sync
+    // ("invalid PTCP magic") and the handshake aborts.
     socket2
         .connect(main_server)
         .await
@@ -430,26 +472,31 @@ pub async fn p2p_handshake(
             &mut cseq,
         )
         .await;
-
-    socket2
-        .connect(&agent)
-        .await
-        .map_err(|e| format!("reconnect agent: {e}"))?;
-    match time::timeout(time::Duration::from_secs(8), socket2.dh_read()).await {
-        Ok(Ok(_)) => {}
-        Ok(Err(e)) => return Err(e),
+    match time::timeout(time::Duration::from_secs(5), socket2.dh_read_raw()).await {
+        Ok(r) => {
+            println!("relay-channel => {} {}", r.code, r.status);
+        }
         Err(_) => {
             println!("relay-channel ack timed out; continuing with agent session");
         }
     }
 
-    let mut session = PTCPSession::new();
-
-    socket2.ptcp_request(session.send(PTCPBody::Sync)).await;
-    let sync = socket2
-        .ptcp_read()
+    socket2
+        .connect(&agent)
         .await
-        .ok_or_else(|| "PTCP Sync response missing".to_string())?;
+        .map_err(|e| format!("reconnect agent: {e}"))?;
+
+    // Some agents also push a short HTTP banner after accept — drain briefly
+    // so it cannot steal the first Sync read.
+    match time::timeout(time::Duration::from_millis(400), socket2.dh_read_raw()).await {
+        Ok(r) => {
+            println!("agent pre-sync => {} {}", r.code, r.status);
+        }
+        Err(_) => {}
+    }
+
+    let mut session = PTCPSession::new();
+    let sync = ptcp_sync_handshake(&socket2, &mut session).await?;
     session.recv(sync);
 
     if relay_mode {

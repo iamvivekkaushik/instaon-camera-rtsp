@@ -287,6 +287,11 @@ final class P2PTunnel {
                 || lower.contains("reader:")
                 || lower.contains("writer:")
                 || lower.contains("probe/device")
+                || lower.contains("relay-channel")
+                || lower.contains("invalid ptcp")
+                || lower.contains("ptcp sync")
+                || lower.contains("pre-sync")
+                || lower.contains("agent pre-sync")
             if interesting {
                 onLog?(text)
             }
