@@ -108,7 +108,7 @@ final class P2PTunnel {
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: binary)
-        // Match the verified CLI: --relay -c instaon -t 0 -p 127.0.0.1:PORT:554 SN
+        // Match the verified CLI: --relay -c instaon -t 0 -p 127.0.0.1:PORT:554 -s SN
         // Do not pass -u/--password: channel auth (-t 1) is unused, and device
         // RTSP digest is applied by ffmpeg on the local URL, not by dh-p2p.
         var args: [String] = []
@@ -119,7 +119,7 @@ final class P2PTunnel {
             "-c", cloud,
             "-t", "0",
             "-p", "127.0.0.1:\(localPort):554",
-            serial,
+            "-s", serial,
         ])
         process.arguments = args
 

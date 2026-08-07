@@ -22,13 +22,11 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/release/dh-p2p /usr/local/bin/dh-p2p
-COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 # Local RTSP tunnel port (override with -p / --port)
 EXPOSE 1554/tcp
 
-# Pass CLI args at run time, e.g.:
-#   docker run ... dh-p2p --relay -c instaon -t 0 -s SERIAL
-# Dokku: dokku ps:set APP dockerfile-start-cmd "--relay -c instaon -t 0 -s SERIAL"
+# Bind must be 0.0.0.0 for Docker/Dokku (binary default is 127.0.0.1).
+# Dokku (replaces CMD — include the binary name):
+#   dokku ps:set instaon-relay dockerfile-start-cmd 'dh-p2p --relay --cloud=instaon --type=0 --port=0.0.0.0:1554:554 --serial=YOUR_SERIAL'
 CMD ["dh-p2p"]

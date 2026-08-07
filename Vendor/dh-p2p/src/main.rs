@@ -45,11 +45,8 @@ struct Cli {
     #[arg(long)]
     password: Option<String>,
     /// Serial number of the camera
-    #[arg(short = 's', long = "serial", value_name = "SERIAL")]
-    serial_flag: Option<String>,
-    /// Serial number of the camera (positional alternative to -s/--serial)
-    #[arg(value_name = "SERIAL")]
-    serial_pos: Option<String>,
+    #[arg(short = 's', long = "serial", required = true, value_name = "SERIAL")]
+    serial: String,
 }
 
 #[tokio::main]
@@ -57,14 +54,7 @@ async fn main() {
     let args = Cli::parse();
     set_cloud(&args.cloud);
 
-    let serial = match (args.serial_flag, args.serial_pos) {
-        (Some(s), None) | (None, Some(s)) => s,
-        (Some(a), Some(b)) if a == b => a,
-        (Some(_), Some(_)) => {
-            die(2, "Conflicting serial: use either -s/--serial or positional, not both")
-        }
-        (None, None) => die(2, "Serial is required (-s/--serial SERIAL or positional SERIAL)"),
-    };
+    let serial = args.serial;
     let port = args.port.unwrap_or("127.0.0.1:1554:554".to_string());
 
     let parts: Vec<&str> = port.split(':').collect();
