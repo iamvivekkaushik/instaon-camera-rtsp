@@ -23,10 +23,10 @@ RUN apt-get update \
 
 COPY --from=builder /app/target/release/dh-p2p /usr/local/bin/dh-p2p
 
-# Local RTSP tunnel port (override with -p / --port)
 EXPOSE 1554/tcp
 
-# Bind must be 0.0.0.0 for Docker/Dokku (binary default is 127.0.0.1).
-# Dokku (replaces CMD — include the binary name):
-#   dokku ps:set instaon-relay dockerfile-start-cmd 'dh-p2p --relay --cloud=instaon --type=0 --port=0.0.0.0:1554:554 --serial=YOUR_SERIAL'
-ENTRYPOINT ["dh-p2p"]
+# Config via env (recommended on Dokku) or CLI flags.
+#   dokku config:set instaon-relay \
+#     SERIAL=YOUR_SERIAL RELAY=true CLOUD=instaon AUTH_TYPE=0 \
+#     PORT_SPEC=0.0.0.0:1554:554
+CMD ["dh-p2p"]

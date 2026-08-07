@@ -27,25 +27,30 @@ fn die(code: i32, msg: &str) -> ! {
 #[command(about = "A PoC implementation of TCP tunneling over Dahua P2P protocol.", long_about = None)]
 struct Cli {
     /// Bind address, port and remote port. Default: 127.0.0.1:1554:554
-    #[arg(short, long, value_name = "[bind_address:]port:remote_port")]
+    #[arg(
+        short,
+        long,
+        env = "PORT_SPEC",
+        value_name = "[bind_address:]port:remote_port"
+    )]
     port: Option<String>,
     /// Relay mode (experimental)
-    #[arg(short, long)]
+    #[arg(short, long, env = "RELAY", default_value_t = false)]
     relay: bool,
     /// P2P cloud: instaon | instaon_ctc | easy4ip
-    #[arg(short = 'c', long, default_value = "instaon")]
+    #[arg(short = 'c', long, env = "CLOUD", default_value = "instaon")]
     cloud: String,
     /// Channel auth type: 0=none, 1=device login, auto=try 0 then 1
-    #[arg(short = 't', long, default_value = "auto")]
+    #[arg(short = 't', long = "type", env = "AUTH_TYPE", default_value = "auto")]
     r#type: String,
     /// Device username (required for -t 1 / auto on auth-required devices)
-    #[arg(short = 'u', long)]
+    #[arg(short = 'u', long, env = "USERNAME")]
     username: Option<String>,
     /// Device password (required for -t 1 / auto on auth-required devices)
-    #[arg(long)]
+    #[arg(long, env = "PASSWORD")]
     password: Option<String>,
-    /// Serial number of the camera
-    #[arg(short = 's', long = "serial", required = true, value_name = "SERIAL")]
+    /// Serial number of the camera (-s/--serial or SERIAL env)
+    #[arg(short = 's', long = "serial", env = "SERIAL", value_name = "SERIAL")]
     serial: String,
 }
 

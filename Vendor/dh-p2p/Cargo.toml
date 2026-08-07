@@ -9,7 +9,7 @@ async-trait = "0.1.74"
 base64 = "0.21.5"
 chrono = "0.4.31"
 cipher = "0.4"
-clap = { version = "4.4.11", features = ["derive"] }
+clap = { version = "4.4.11", features = ["derive", "env"] }
 libc = "0.2"
 hmac = "0.12"
 md-5 = "0.10"
