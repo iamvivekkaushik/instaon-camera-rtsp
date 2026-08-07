@@ -1,0 +1,37 @@
+name: Dev-BE Deployment
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - Vendor/dh-p2p/**
+      - .github/workflows/dev-be-deployment.yml
+
+jobs:
+  push:
+    name: Deploy Backend
+    timeout-minutes: 18
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Tailscale
+        uses: tailscale/github-action@v3.2.3
+        with:
+          oauth-client-id: ${{ secrets.TAILSCALE_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TAILSCALE_OAUTH_SECRET }}
+          tags: tag:ci
+
+      - id: deploy
+        name: Deploy to dokku
+        uses: idoberko2/dokku-deploy-github-action@v1.0.1
+        with:
+          ssh-private-key: ${{ secrets.DEV_SSH_PRIVATE_KEY }}
+          dokku-host: "100.87.53.32"
+          ssh-port: "22"
+          app-name: "instaon-relay"
+          git-push-flags: "--force"

@@ -52,3 +52,9 @@ Credentials come from the gCMOB app config.
 ## If P2P fails with 404 on `p2p-channel`
 
 The cloud knows the SN but the device is not online on that P2P server. Open live view once in the phone app so the NVR registers, then retry here.
+
+## Run dh-p2p
+
+```
+./Vendor/dh-p2p-bin --relay -c instaon -t 0 -p 0:1555:554 2009011801001104
+```
