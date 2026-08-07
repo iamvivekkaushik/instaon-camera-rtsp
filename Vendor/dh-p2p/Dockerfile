@@ -29,6 +29,6 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 EXPOSE 1554/tcp
 
 # Pass CLI args at run time, e.g.:
-#   docker run ... dh-p2p --relay -c instaon -t 0 SERIAL
-# Dokku: set the app start command to those same args after ENTRYPOINT.
+#   docker run ... dh-p2p --relay -c instaon -t 0 -s SERIAL
+# Dokku: dokku ps:set APP dockerfile-start-cmd "--relay -c instaon -t 0 -s SERIAL"
 CMD ["dh-p2p"]
