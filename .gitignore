@@ -1,0 +1,12 @@
+.build/
+.swiftpm/
+CameraStreamer.app/
+Vendor/ffmpeg
+Vendor/ffprobe
+Vendor/dh-p2p-bin
+Vendor/dh-p2p/target/
+Vendor/dh-p2p/.venv/
+Vendor/decrypted_p2p_config.txt
+Vendor/*.zip
+*.xcodeproj/
+xcuserdata/

@@ -1,0 +1,23 @@
+[package]
+name = "dh-p2p"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aes = "0.8"
+async-trait = "0.1.74"
+base64 = "0.21.5"
+chrono = "0.4.31"
+cipher = "0.4"
+clap = { version = "4.4.11", features = ["derive"] }
+libc = "0.2"
+hmac = "0.12"
+md-5 = "0.10"
+ofb = "0.6"
+pbkdf2 = "0.12"
+rand = "0.8.5"
+serde_json = "1"
+sha1 = "0.10.6"
+sha2 = "0.10"
+tokio = { version = "1", features = ["full"] }
+xml-rs = "0.8.19"
