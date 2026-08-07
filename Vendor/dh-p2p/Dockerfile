@@ -29,7 +29,7 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 EXPOSE 1554/tcp
 
 ENTRYPOINT ["docker-entrypoint.sh"]
-# Args come from env (Dokku config) or docker run CLI.
-# Required: SERIAL
-# Optional: RELAY=1 CLOUD=instaon AUTH_TYPE=0 USERNAME PASSWORD BIND=0.0.0.0:1554:554
-CMD []
+# Pass CLI args at run time, e.g.:
+#   docker run ... dh-p2p --relay -c instaon -t 0 SERIAL
+# Dokku: set the app start command to those same args after ENTRYPOINT.
+CMD ["--help"]
