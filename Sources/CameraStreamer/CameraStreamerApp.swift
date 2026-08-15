@@ -3,6 +3,7 @@ import SwiftUI
 @main
 struct CameraStreamerApp: App {
     @StateObject private var settings = AppSettings.shared
+    @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
         WindowGroup {
@@ -10,6 +11,19 @@ struct CameraStreamerApp: App {
                 .frame(minWidth: 1000, minHeight: 680)
                 .environmentObject(settings)
         }
+        .commands {
+            CommandGroup(replacing: .appInfo) {
+                Button("About CameraStreamer") {
+                    openWindow(id: "about")
+                }
+            }
+        }
+
+        Window("About CameraStreamer", id: "about") {
+            AboutView()
+        }
+        .windowResizability(.contentSize)
+        .defaultPosition(.center)
 
         Settings {
             SettingsView(settings: settings)

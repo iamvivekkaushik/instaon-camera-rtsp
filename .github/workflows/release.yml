@@ -1,0 +1,63 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & release macOS app
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo + dh-p2p target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            Vendor/dh-p2p/target
+          key: ${{ runner.os }}-cargo-dhp2p-${{ hashFiles('Vendor/dh-p2p/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-dhp2p-
+
+      - name: Build dh-p2p tunnel binary
+        run: |
+          cd Vendor/dh-p2p
+          CARGO_TARGET_DIR=target cargo build --release
+          cp target/release/dh-p2p ../dh-p2p-bin
+          chmod +x ../dh-p2p-bin
+
+      - name: Download static ffmpeg
+        run: |
+          set -e
+          mkdir -p /tmp/ffdl && cd /tmp/ffdl
+          # Prefer arm64 static build; fall back to x86_64 (Rosetta).
+          if curl -fL --retry 3 -o ffmpeg.zip "https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/release/ffmpeg.zip"; then
+            :
+          else
+            curl -fL --retry 3 -o ffmpeg.zip "https://evermeet.cx/ffmpeg/getrelease/zip"
+          fi
+          unzip -o ffmpeg.zip
+          cp ffmpeg "$GITHUB_WORKSPACE/Vendor/ffmpeg"
+          chmod +x "$GITHUB_WORKSPACE/Vendor/ffmpeg"
+          file "$GITHUB_WORKSPACE/Vendor/ffmpeg"
+
+      - name: Package app + DMG
+        run: ./scripts/package.sh "${GITHUB_REF_NAME#v}"
+
+      - name: Upload DMG to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/CameraStreamer-*.dmg
+          generate_release_notes: true

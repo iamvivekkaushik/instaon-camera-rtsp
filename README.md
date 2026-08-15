@@ -18,12 +18,19 @@ Needs `Vendor/ffmpeg` and `Vendor/dh-p2p-bin`.
 ### App icon + DMG
 
 ```bash
-./scripts/package.sh
+./scripts/package.sh          # version from Info.plist
+./scripts/package.sh 1.2.3    # explicit version (stamps bundle + DMG name)
 ```
 
 Produces:
 - `CameraStreamer.app` (with `Resources/AppIcon.icns`)
-- `dist/CameraStreamer-1.0.0.dmg` (drag to Applications)
+- `dist/CameraStreamer-<version>.dmg` (drag to Applications)
+
+### Release (CI)
+
+Push a tag `v*` (e.g. `v1.2.3`) — the Release workflow (`.github/workflows/release.yml`)
+builds dh-p2p + the app, stamps the tag version into the bundle (shown in
+**CameraStreamer menu → About CameraStreamer**), and attaches the DMG to a GitHub Release.
 
 Rebuild tunnel binary:
 

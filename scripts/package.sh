@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Build CameraStreamer.app and an installable DMG.
+# Usage: ./scripts/package.sh [VERSION]   (default: version from Info.plist)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -7,9 +8,11 @@ cd "$ROOT"
 
 APP_NAME="CameraStreamer"
 APP="$ROOT/${APP_NAME}.app"
-DMG="$ROOT/dist/${APP_NAME}-1.0.0.dmg"
 VOL_NAME="CameraStreamer"
 STAGE="$ROOT/dist/dmg-stage"
+
+VERSION="${1:-$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT/Info.plist")}"
+DMG="$ROOT/dist/${APP_NAME}-${VERSION}.dmg"
 
 if [[ ! -x "$ROOT/Vendor/ffmpeg" ]]; then
   echo "Missing Vendor/ffmpeg. Download a macOS ffmpeg binary into CameraStreamer/Vendor/ffmpeg" >&2
@@ -30,7 +33,7 @@ if [[ ! -f "$ROOT/Resources/AppIcon.icns" ]]; then
   exit 1
 fi
 
-echo "==> Building release binary"
+echo "==> Building release binary (version $VERSION)"
 swift build -c release
 BIN="$ROOT/.build/release/CameraStreamer"
 
@@ -45,6 +48,10 @@ cp "$ROOT/Vendor/dh-p2p-bin" "$APP/Contents/Resources/dh-p2p-bin"
 chmod +x "$APP/Contents/MacOS/CameraStreamer" \
   "$APP/Contents/Resources/ffmpeg" \
   "$APP/Contents/Resources/dh-p2p-bin"
+
+# Stamp the release version into the bundle (drives the About panel).
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" "$APP/Contents/Info.plist"
 
 # Refresh Finder/Dock icon cache hints for local builds
 touch "$APP"
