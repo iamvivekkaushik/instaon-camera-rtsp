@@ -14,34 +14,43 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
                 ForEach(settings.profiles) { profile in
-                    HStack(spacing: 8) {
-                        Image(systemName: settings.selectedProfileID == profile.id
-                              ? "checkmark.circle.fill" : "circle")
-                            .foregroundStyle(settings.selectedProfileID == profile.id
-                                             ? Color.accentColor : Color.secondary)
+                    let isSelected = settings.selectedProfileID == profile.id
+                    HStack(spacing: 10) {
+                        Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                            .foregroundStyle(isSelected ? Theme.accent : Theme.textTertiary)
                             .accessibilityHidden(true)
                         VStack(alignment: .leading, spacing: 1) {
                             Text(profile.displayName)
                                 .font(.callout.weight(.medium))
+                                .foregroundStyle(Theme.textPrimary)
                             Text(profile.serial.isEmpty ? "No serial" : profile.serial)
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
+                                .font(.caption2.monospaced())
+                                .foregroundStyle(Theme.textSecondary)
                         }
                         Spacer()
                         Button(role: .destructive) {
                             settings.removeProfile(profile.id)
                         } label: {
                             Image(systemName: "trash")
+                                .foregroundStyle(Theme.textTertiary)
                         }
                         .buttonStyle(.borderless)
                         .help("Delete profile and its saved password")
                         .accessibilityLabel("Delete profile \(profile.displayName)")
                     }
+                    .padding(.vertical, 4)
+                    .padding(.horizontal, 8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(isSelected ? Theme.accent.opacity(0.10) : Color.clear)
+                    )
                     .contentShape(Rectangle())
                     .onTapGesture { settings.selectedProfileID = profile.id }
                 }
-                Button("Add Profile") {
+                Button {
                     _ = settings.addProfile()
+                } label: {
+                    Label("Add Profile", systemImage: "plus")
                 }
                 .accessibilityLabel("Add device profile")
                 if didSaveFlash {

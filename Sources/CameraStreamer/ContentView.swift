@@ -17,11 +17,8 @@ struct ContentView: View {
     var body: some View {
         VStack(spacing: 0) {
             toolbar
-                .padding(.horizontal, 16)
-                .padding(.vertical, 10)
-                .background(.bar)
 
-            Divider()
+            Divider().overlay(Theme.cardBorder)
 
             HSplitView {
                 controlPanel
@@ -33,13 +30,13 @@ struct ContentView: View {
             .padding(12)
 
             if settings.showLogs {
-                Divider()
+                Divider().overlay(Theme.cardBorder)
                 logPanel
                     .frame(minHeight: 140, idealHeight: 180, maxHeight: 260)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Theme.windowBackground)
         .animation(.easeInOut(duration: 0.22), value: settings.showLogs)
         .onAppear {
             settings.ensureChannelSlots(count: settings.gridCapacity)
@@ -64,56 +61,72 @@ struct ContentView: View {
             VStack(spacing: 0) {
                 HStack {
                     Text("Settings")
-                        .font(.headline)
+                        .font(Theme.titleFont(16, weight: .bold))
                     Spacer()
                     Button("Done") { showSettings = false }
                         .keyboardShortcut(.defaultAction)
                 }
                 .padding()
-                Divider()
+                Divider().overlay(Theme.cardBorder)
                 SettingsView(settings: settings)
             }
-            .frame(minWidth: 460, minHeight: 500)
+            .frame(minWidth: 500, minHeight: 540)
         }
     }
 
     // MARK: - Toolbar
 
+    private var liveStatus: (color: Color, text: String) {
+        let allCells = pool.engines.values.flatMap(\.cells)
+        let live = allCells.filter {
+            if case .playing = $0.state { return true } else { return false }
+        }.count
+        if live > 0 { return (Theme.success, "Live · \(live) ch") }
+        if pool.isBusy { return (Theme.warning, "Starting…") }
+        return (Theme.neutral, "Idle")
+    }
+
     private var toolbar: some View {
-        HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
+        HStack(spacing: 14) {
+            AppMarkBadge()
+
+            VStack(alignment: .leading, spacing: 1) {
                 Text("CameraStreamer")
-                    .font(.headline)
+                    .font(Theme.titleFont(15, weight: .bold))
+                    .foregroundStyle(Theme.textPrimary)
                     .accessibilityAddTraits(.isHeader)
                 Text(toolbarSubtitle)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.textSecondary)
                     .lineLimit(1)
             }
 
             Spacer()
 
+            StatusPill(color: liveStatus.color, text: liveStatus.text)
+
             layoutPicker
-                .frame(maxWidth: 220)
+                .frame(maxWidth: 200)
 
-            Toggle(isOn: $settings.showLogs) {
-                Label(
-                    settings.showLogs ? "Hide Logs" : "Show Logs",
-                    systemImage: settings.showLogs ? "doc.text.fill" : "doc.text"
-                )
-            }
-            .toggleStyle(.button)
-            .help("Show or hide diagnostic logs")
-            .accessibilityLabel(settings.showLogs ? "Hide logs" : "Show logs")
+            HStack(spacing: 8) {
+                ToolbarIconButton(
+                    systemImage: settings.showLogs ? "doc.text.fill" : "doc.text",
+                    help: "Show or hide diagnostic logs",
+                    isActive: settings.showLogs
+                ) {
+                    settings.showLogs.toggle()
+                }
+                .accessibilityLabel(settings.showLogs ? "Hide logs" : "Show logs")
 
-            Button {
-                showSettings = true
-            } label: {
-                Label("Settings", systemImage: "gearshape")
+                ToolbarIconButton(systemImage: "gearshape", help: "Device profiles and saved defaults") {
+                    showSettings = true
+                }
+                .accessibilityLabel("Open settings")
             }
-            .help("Device profiles and saved defaults")
-            .accessibilityLabel("Open settings")
         }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(.bar)
     }
 
     private var layoutPicker: some View {
@@ -124,6 +137,7 @@ struct ContentView: View {
         }
         .pickerStyle(.segmented)
         .labelsHidden()
+        .controlSize(.small)
         .accessibilityLabel("Multiview layout")
         .help("Number of camera tiles")
     }
@@ -132,7 +146,7 @@ struct ContentView: View {
 
     private var controlPanel: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 12) {
                 Picker("View", selection: $settings.viewMode) {
                     ForEach(LiveViewMode.allCases) { mode in
                         Text(mode.rawValue).tag(mode)
@@ -154,42 +168,20 @@ struct ContentView: View {
                 actionButtons
 
                 if let device = selectedDeviceResult {
-                    GroupBox {
-                        Text(device.summary)
-                            .font(.system(.caption, design: .monospaced))
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(4)
-                            .accessibilityLabel("Device lookup result")
-                    } label: {
-                        Label("Lookup", systemImage: "antenna.radiowaves.left.and.right")
-                    }
+                    lookupSection(device)
                 }
 
-                GroupBox {
-                    Text(statusMessage)
-                        .font(.callout)
-                        .foregroundStyle(.primary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
-                        .padding(4)
-                        .accessibilityLabel("Status")
-                        .accessibilityValue(statusMessage)
-                } label: {
-                    Label("Status", systemImage: "info.circle")
-                }
+                statusSection
 
-                Text("Close gCMOB while streaming. Prefer Sub for multiview. Use Restart on a failed tile.")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                CardCaption(text: "Close gCMOB while streaming. Prefer Sub for multiview. Restart a tile from its corner icon.")
+                    .padding(.horizontal, 2)
             }
             .padding(.trailing, 4)
         }
     }
 
     private var deviceSection: some View {
-        GroupBox {
+        SectionCard(title: "Device", systemImage: "video.fill") {
             VStack(alignment: .leading, spacing: 10) {
                 Picker("Camera", selection: $settings.selectedProfileID) {
                     ForEach(settings.profiles) { profile in
@@ -200,24 +192,21 @@ struct ContentView: View {
                 .help("Saved device profiles — edit credentials in Settings")
 
                 if let profile = settings.selectedProfile {
-                    VStack(alignment: .leading, spacing: 2) {
+                    VStack(alignment: .leading, spacing: 3) {
                         Text(profile.serial.isEmpty ? profile.displayName : profile.serial)
-                            .font(.caption2.monospaced())
-                            .foregroundStyle(.secondary)
-                        Text("Edit credentials in Settings.")
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(Theme.textSecondary)
                         if settings.password(for: profile.id).isEmpty {
                             Label("No password saved — set it in Settings.", systemImage: "exclamationmark.triangle.fill")
                                 .font(.caption2)
-                                .foregroundStyle(.orange)
+                                .foregroundStyle(Theme.warning)
                         }
                     }
                 } else {
                     HStack {
                         Text("No camera profiles yet.")
                             .font(.callout)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Theme.textSecondary)
                         Spacer()
                         Button("Add Profile") {
                             _ = settings.addProfile()
@@ -226,35 +215,31 @@ struct ContentView: View {
                     }
                 }
             }
-            .padding(4)
-        } label: {
-            Label("Device", systemImage: "video.fill")
         }
     }
 
     private var channelSection: some View {
-        GroupBox {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack {
-                    Text("Channels in grid")
-                        .font(.subheadline.weight(.medium))
-                        .accessibilityAddTraits(.isHeader)
-                    Spacer()
+        SectionCard(
+            title: "Multiview",
+            systemImage: "square.grid.2x2",
+            trailing: {
+                HStack(spacing: 6) {
                     Button("All") { settings.setAllSlotsEnabled(true) }
-                        .controlSize(.small)
+                        .controlSize(.mini)
                         .help("Enable all slots for playback")
                     Button("None") { settings.setAllSlotsEnabled(false) }
-                        .controlSize(.small)
+                        .controlSize(.mini)
                         .help("Disable all slots")
                 }
+            }
+        ) {
+            VStack(alignment: .leading, spacing: 10) {
+                CardCaption(text: "Check Play for each slot included when you press Start.")
 
-                Text("Check Play for each slot included when you press Start.")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-
-                HStack {
+                HStack(spacing: 8) {
                     Text("All streams")
-                        .font(.subheadline.weight(.medium))
+                        .font(.callout.weight(.medium))
+                        .foregroundStyle(Theme.textPrimary)
                     Picker("All streams", selection: Binding(
                         get: { settings.subtype },
                         set: { onAllStreamsChange($0) }
@@ -270,77 +255,70 @@ struct ContentView: View {
 
                 channelEditors
             }
-            .padding(4)
-        } label: {
-            Label("Multiview", systemImage: "square.grid.2x2")
         }
     }
 
     private var customSection: some View {
-        GroupBox {
+        SectionCard(title: "Custom view", systemImage: "rectangle.grid.2x2") {
             VStack(alignment: .leading, spacing: 10) {
-                Text("Each tile: pick a device and a channel. Press Start to open one tunnel per device.")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                CardCaption(text: "Each tile: pick a device and a channel. Start opens one tunnel per device.")
 
-                ForEach(0..<settings.gridCapacity, id: \.self) { index in
-                    HStack(spacing: 8) {
-                        Text("\(index + 1)")
-                            .font(.caption2.monospacedDigit())
-                            .foregroundStyle(.secondary)
-                            .frame(width: 14, alignment: .trailing)
+                VStack(spacing: 8) {
+                    ForEach(0..<settings.gridCapacity, id: \.self) { index in
+                        HStack(spacing: 8) {
+                            Text("\(index + 1)")
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(Theme.textTertiary)
+                                .frame(width: 14, alignment: .trailing)
 
-                        Picker("Device", selection: customProfileBinding(index)) {
-                            Text("—").tag(UUID?.none)
-                            ForEach(settings.profiles) { profile in
-                                Text(profile.displayName).tag(profile.id as UUID?)
+                            Picker("Device", selection: customProfileBinding(index)) {
+                                Text("—").tag(UUID?.none)
+                                ForEach(settings.profiles) { profile in
+                                    Text(profile.displayName).tag(profile.id as UUID?)
+                                }
                             }
-                        }
-                        .labelsHidden()
-                        .accessibilityLabel("Device for custom slot \(index + 1)")
+                            .labelsHidden()
+                            .accessibilityLabel("Device for custom slot \(index + 1)")
 
-                        TextField("CH", text: customChannelBinding(index))
-                            .textFieldStyle(.roundedBorder)
-                            .frame(maxWidth: 56)
-                            .accessibilityLabel("Channel for custom slot \(index + 1)")
+                            TextField("CH", text: customChannelBinding(index))
+                                .textFieldStyle(.roundedBorder)
+                                .frame(maxWidth: 52)
+                                .accessibilityLabel("Channel for custom slot \(index + 1)")
 
-                        Picker("Stream for custom slot \(index + 1)", selection: Binding(
-                            get: {
-                                let slots = settings.customSlots
-                                guard index < slots.count else { return settings.subtype }
-                                return slots[index].subtype
-                            },
-                            set: { onCustomSlotSubtypeChange(index, $0) }
-                        )) {
-                            Text("Sub").tag(1)
-                            Text("Main").tag(0)
+                            Picker("Stream for custom slot \(index + 1)", selection: Binding(
+                                get: {
+                                    let slots = settings.customSlots
+                                    guard index < slots.count else { return settings.subtype }
+                                    return slots[index].subtype
+                                },
+                                set: { onCustomSlotSubtypeChange(index, $0) }
+                            )) {
+                                Text("Sub").tag(1)
+                                Text("Main").tag(0)
+                            }
+                            .pickerStyle(.segmented)
+                            .labelsHidden()
+                            .controlSize(.mini)
+                            .frame(maxWidth: 96)
+                            .accessibilityLabel("Stream quality for custom slot \(index + 1)")
                         }
-                        .pickerStyle(.segmented)
-                        .labelsHidden()
-                        .controlSize(.mini)
-                        .frame(maxWidth: 96)
-                        .accessibilityLabel("Stream quality for custom slot \(index + 1)")
                     }
                 }
             }
-            .padding(4)
-        } label: {
-            Label("Custom view", systemImage: "rectangle.grid.2x2")
         }
     }
 
     private var streamDefaultsSection: some View {
-        GroupBox {
-            Picker("Mode", selection: $settings.streamMode) {
-                ForEach(StreamMode.allCases) { mode in
-                    Text(mode.rawValue).tag(mode)
+        SectionCard(title: "Streaming", systemImage: "antenna.radiowaves.left.and.right") {
+            VStack(alignment: .leading, spacing: 8) {
+                Picker("Mode", selection: $settings.streamMode) {
+                    ForEach(StreamMode.allCases) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
                 }
+                .accessibilityLabel("Connection mode")
+                CardCaption(text: "Auto tries direct RTSP before the relay tunnel when possible.")
             }
-            .accessibilityLabel("Connection mode")
-            .padding(4)
-        } label: {
-            Label("Streaming", systemImage: "antenna.radiowaves.left.and.right")
         }
     }
 
@@ -348,15 +326,12 @@ struct ContentView: View {
         let count = settings.gridCapacity
         return VStack(alignment: .leading, spacing: 8) {
             LazyVGrid(
-                columns: [GridItem(.adaptive(minimum: 120), spacing: 10)],
-                spacing: 10
+                columns: [GridItem(.adaptive(minimum: 118), spacing: 8)],
+                spacing: 8
             ) {
                 ForEach(0..<count, id: \.self) { index in
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("Slot \(index + 1)")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                        HStack(spacing: 8) {
+                        HStack(spacing: 6) {
                             Toggle(
                                 "Play",
                                 isOn: bindingForSlotEnabled(index)
@@ -366,15 +341,19 @@ struct ContentView: View {
                             .help("Include this channel when starting")
                             .accessibilityLabel("Play channel slot \(index + 1)")
 
-                            TextField(
-                                "CH",
-                                text: bindingForChannelDraft(index)
-                            )
-                            .textFieldStyle(.roundedBorder)
-                            .frame(maxWidth: 64)
-                            .accessibilityLabel("Channel number for slot \(index + 1)")
-                            .onSubmit { commitChannelDrafts() }
+                            Text("Slot \(index + 1)")
+                                .font(.caption2)
+                                .foregroundStyle(Theme.textTertiary)
+                            Spacer()
                         }
+
+                        TextField(
+                            "CH",
+                            text: bindingForChannelDraft(index)
+                        )
+                        .textFieldStyle(.roundedBorder)
+                        .accessibilityLabel("Channel number for slot \(index + 1)")
+                        .onSubmit { commitChannelDrafts() }
 
                         Picker("Stream for slot \(index + 1)", selection: Binding(
                             get: { settings.slotSubtype(at: index) },
@@ -400,43 +379,85 @@ struct ContentView: View {
     }
 
     private var actionButtons: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 10) {
             Button {
                 commitChannelDrafts()
                 Task { await lookup() }
             } label: {
-                if isLookingUp {
-                    ProgressView()
-                        .controlSize(.small)
-                        .padding(.horizontal, 10)
-                } else {
-                    Text("Look Up")
+                Group {
+                    if isLookingUp {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Label("Look Up", systemImage: "antenna.radiowaves.left.and.right")
+                    }
                 }
+                .frame(maxWidth: .infinity)
             }
+            .buttonStyle(.bordered)
             .disabled(isLookingUp || settings.viewMode != .device || selectedSerialTrimmed.isEmpty)
             .keyboardShortcut("l", modifiers: [.command])
             .help("Query InstaOn for device metadata")
             .accessibilityLabel("Look up device")
 
-            Button("Start") {
+            Button {
                 commitChannelDrafts()
                 Task { await startStream() }
+            } label: {
+                Label("Start", systemImage: "play.fill")
+                    .frame(maxWidth: .infinity)
             }
+            .buttonStyle(.borderedProminent)
+            .tint(Theme.accent)
             .disabled(!canStart)
             .keyboardShortcut(.defaultAction)
             .help("Start multiview for configured channels")
             .accessibilityLabel("Start stream")
 
-            Button("Stop") {
+            Button {
                 pool.stopAll()
                 statusMessage = "Stopped."
+            } label: {
+                Label("Stop", systemImage: "stop.fill")
+                    .frame(maxWidth: .infinity)
             }
+            .buttonStyle(.bordered)
             .disabled(!pool.isBusy && !pool.isPlaying)
             .keyboardShortcut(".", modifiers: [.command])
             .help("Stop all streams and tunnels")
             .accessibilityLabel("Stop stream")
         }
         .controlSize(.large)
+    }
+
+    private func lookupSection(_ device: DeviceLookupResult) -> some View {
+        SectionCard(title: "Lookup", systemImage: "antenna.radiowaves.left.and.right") {
+            Text(device.summary)
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(Theme.textSecondary)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityLabel("Device lookup result")
+        }
+    }
+
+    private var statusSection: some View {
+        SectionCard(title: "Status", systemImage: "info.circle") {
+            HStack(alignment: .top, spacing: 8) {
+                Circle()
+                    .fill(liveStatus.color)
+                    .frame(width: 7, height: 7)
+                    .padding(.top, 5)
+                    .accessibilityHidden(true)
+                Text(statusMessage)
+                    .font(.callout)
+                    .foregroundStyle(Theme.textPrimary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+                    .accessibilityLabel("Status")
+                    .accessibilityValue(statusMessage)
+            }
+        }
     }
 
     // MARK: - Video
@@ -458,19 +479,24 @@ struct ContentView: View {
                 badges: tileBadges
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(8)
             .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
                     .fill(Color.black.opacity(0.35))
             )
-            .padding(2)
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(Theme.cardBorder, lineWidth: 0.5)
+            )
 
             if !focusedActiveRTSP.isEmpty {
                 Text(focusedActiveRTSP)
                     .font(.caption2.monospaced())
                     .lineLimit(2)
                     .textSelection(.enabled)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.textTertiary)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 4)
                     .accessibilityLabel("Active RTSP URL")
             }
         }
@@ -560,29 +586,33 @@ struct ContentView: View {
     // MARK: - Logs
 
     private var logPanel: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Label("Logs", systemImage: "terminal")
-                    .font(.subheadline.weight(.semibold))
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "terminal")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Theme.accent)
+                Text("Logs")
+                    .font(Theme.titleFont())
+                    .foregroundStyle(Theme.textPrimary)
                     .accessibilityAddTraits(.isHeader)
                 Spacer()
-                Button {
+                ToolbarIconButton(systemImage: "chevron.down", help: "Hide logs") {
                     settings.showLogs = false
-                } label: {
-                    Image(systemName: "chevron.down")
                 }
-                .buttonStyle(.borderless)
-                .help("Hide logs")
                 .accessibilityLabel("Hide logs")
             }
             .padding(.horizontal, 12)
-            .padding(.top, 8)
+            .padding(.top, 10)
 
             LogTextView(text: statusText)
                 .background(Color(nsColor: .textBackgroundColor).opacity(0.55))
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(Theme.cardBorder, lineWidth: 0.5)
+                )
                 .padding(.horizontal, 12)
-                .padding(.bottom, 10)
+                .padding(.bottom, 12)
                 .accessibilityLabel("Diagnostic log output")
                 .accessibilityValue(statusText)
         }
@@ -830,9 +860,9 @@ struct ContentView: View {
             return
         }
 
-        // Group slots per *physical device* (by serial): one engine/tunnel each,
-        // started in parallel. Two profiles with the same serial share one tunnel —
-        // a device allows only one P2P session.
+        // Group slots per *physical device* (by serial): one engine/tunnel each.
+        // Two profiles with the same serial share one tunnel — a device allows
+        // only one P2P session.
         var groups: [String: (profile: DeviceProfile, slots: [CustomSlot])] = [:]
         for slot in slots {
             guard let pid = slot.profileID, let profile = profileFor(pid) else { continue }
@@ -849,8 +879,14 @@ struct ContentView: View {
         // single-session P2P channel) does not tolerate overlapping handshakes
         // from the same client — concurrent starts made all tunnels time out.
         // Channels still stream concurrently once every tunnel is up.
+        // Watch stopEpoch so the Stop button cancels pending device starts/retries.
+        let startEpoch = pool.stopEpoch
         let ordered = groups.sorted(by: { $0.key < $1.key })
         for (index, (_, group)) in ordered.enumerated() {
+            if pool.stopEpoch != startEpoch {
+                statusMessage = "Stopped."
+                return
+            }
             let engine = engineFor(group.profile)
             engine.mode = settings.streamMode
             let target = lookupTarget(for: group.profile)
@@ -860,6 +896,10 @@ struct ContentView: View {
 
             // One retry: relay handshakes are flaky by nature.
             for attempt in 0...1 {
+                if pool.stopEpoch != startEpoch {
+                    statusMessage = "Stopped."
+                    return
+                }
                 await engine.start(
                     device: target,
                     username: group.profile.username,

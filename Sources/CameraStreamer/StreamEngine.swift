@@ -64,6 +64,9 @@ final class StreamEngine: ObservableObject {
     @Published private(set) var activeRTSP: String = ""
     @Published private(set) var logLines: [String] = []
     @Published private(set) var liveChannel: Int?
+    /// Bumped by stop() — every retry/fallback loop watches this and bails out,
+    /// so pressing Stop cancels all in-flight start attempts.
+    private(set) var cancellationEpoch = 0
     /// Tunnel or direct session is live enough to focus / restart a channel.
     var canSwitchChannel: Bool { session != nil }
 
@@ -109,6 +112,7 @@ final class StreamEngine: ObservableObject {
     }
 
     func stop() {
+        cancellationEpoch += 1
         channelRestartTask?.cancel()
         channelRestartTask = nil
         let keys = Array(pipelines.keys)
@@ -178,7 +182,15 @@ final class StreamEngine: ObservableObject {
             "Start serial=\(device.serial) channels=\(ordered.map(String.init).joined(separator: ",")) mode=\(mode.rawValue) → \(modes.map(\.rawValue).joined(separator: ", "))"
         )
 
+        // Captured after our own stop() above: any *subsequent* stop() (the Stop
+        // button) aborts remaining mode attempts.
+        let epoch = cancellationEpoch
+
         for attempt in modes {
+            if cancellationEpoch != epoch {
+                appendLog("Start cancelled (Stop pressed)")
+                return
+            }
             appendLog("—— Mode: \(attempt.rawValue) ——")
             switch attempt {
             case .directRTSP:
@@ -189,7 +201,8 @@ final class StreamEngine: ObservableObject {
                     channels: ordered,
                     subtype: subtype,
                     channelSubtypes: channelSubtypes,
-                    ffmpeg: ffmpeg
+                    ffmpeg: ffmpeg,
+                    epoch: epoch
                 ) {
                     return
                 }
@@ -202,7 +215,8 @@ final class StreamEngine: ObservableObject {
                     channels: ordered,
                     subtype: subtype,
                     channelSubtypes: channelSubtypes,
-                    ffmpeg: ffmpeg
+                    ffmpeg: ffmpeg,
+                    epoch: epoch
                 ) {
                     return
                 }
@@ -457,7 +471,8 @@ final class StreamEngine: ObservableObject {
         channels: [Int],
         subtype: Int,
         channelSubtypes: [Int: Int],
-        ffmpeg: String
+        ffmpeg: String,
+        epoch: Int
     ) async -> Bool {
         let port = device.rtspPort
         let ip = device.ipAddress
@@ -477,6 +492,7 @@ final class StreamEngine: ObservableObject {
         var launched: [PendingLaunch] = []
 
         for channel in channels {
+            if cancellationEpoch != epoch { return false }
             let channelSubtype = channelSubtypes[channel] ?? subtype
             updateCell(channel, state: .probing("ch\(channel)"), rtsp: "")
             let candidates = StreamURLBuilder.candidates(
@@ -552,7 +568,8 @@ final class StreamEngine: ObservableObject {
         channels: [Int],
         subtype: Int,
         channelSubtypes: [Int: Int],
-        ffmpeg: String
+        ffmpeg: String,
+        epoch: Int
     ) async -> Bool {
         state = .tunneling
         for channel in channels {
@@ -602,6 +619,7 @@ final class StreamEngine: ObservableObject {
         appendLog("Opening P2P tunnel (\(tag))…")
 
         for cloud in clouds {
+            if cancellationEpoch != epoch { return false }
             do {
                 try await tunnel.start(
                     serial: serial,
@@ -639,6 +657,12 @@ final class StreamEngine: ObservableObject {
 
             // Round 0: each channel's chosen stream. Round 1: the alternate per channel.
             for round in 0...1 where !remaining.isEmpty {
+                if cancellationEpoch != epoch {
+                    stopAllPipelines()
+                    tunnel.stop()
+                    session = nil
+                    return false
+                }
                 if !tunnel.isRunning {
                     appendLog("Tunnel exited mid-start — restarting…")
                     do {

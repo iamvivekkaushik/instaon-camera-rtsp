@@ -20,7 +20,7 @@ struct MultiviewGrid: View {
 
     var body: some View {
         GeometryReader { geo in
-            let gap: CGFloat = 6
+            let gap: CGFloat = 8
             let colCount = CGFloat(columns)
             let rowCount = CGFloat(max(1, Int(ceil(Double(capacity) / Double(columns)))))
             let cellW = max(80, (geo.size.width - gap * (colCount - 1)) / colCount)
@@ -61,6 +61,8 @@ struct ChannelTile: View {
     let onSelect: () -> Void
     var onRestart: (() -> Void)? = nil
 
+    @State private var isHovering = false
+
     private var isPlaying: Bool {
         if case .playing = cell?.state { return true }
         return false
@@ -85,15 +87,37 @@ struct ChannelTile: View {
         return true
     }
 
+    private var stateColor: Color {
+        guard let cell else { return Theme.neutral }
+        switch cell.state {
+        case .playing: return Theme.success
+        case .failed: return Theme.warning
+        case .idle, .off: return Theme.neutral
+        case .starting, .probing, .tunneling: return Theme.accent
+        }
+    }
+
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color.black.opacity(0.9))
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Theme.tileBackground)
                 .allowsHitTesting(false)
 
             tileContent
+
+            // Scrim on the top edge so the badge stays legible over video.
+            if isPlaying {
+                VStack {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Theme.scrim)
+                        .frame(height: 36)
+                    Spacer()
+                }
+                .allowsHitTesting(false)
+            }
         }
         .frame(width: width, height: height)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(alignment: .topLeading) {
             channelBadge
                 .padding(8)
@@ -105,31 +129,41 @@ struct ChannelTile: View {
                     Button {
                         onRestart?()
                     } label: {
-                        Label("Restart", systemImage: "arrow.clockwise")
-                            .labelStyle(.iconOnly)
-                            .font(.caption.weight(.semibold))
-                            .padding(6)
-                            .background(.ultraThinMaterial, in: Circle())
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 22, height: 22)
+                            .background(Circle().fill(.ultraThinMaterial))
+                            .overlay(Circle().strokeBorder(Color.white.opacity(0.25), lineWidth: 0.5))
                     }
                     .buttonStyle(.plain)
+                    .opacity(isHovering || isFailed ? 1 : 0.55)
                     .help("Restart this channel")
                     .accessibilityLabel("Restart channel")
                     .disabled(isBusy)
                 }
-                statusDot
+                Circle()
+                    .fill(stateColor)
+                    .frame(width: 7, height: 7)
+                    .shadow(color: stateColor.opacity(0.8), radius: 3)
+                    .accessibilityHidden(true)
             }
             .padding(8)
         }
         .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .strokeBorder(
-                    isFocused ? Color.accentColor : Color.white.opacity(0.12),
+                    isFocused ? Theme.accent : Color.white.opacity(isHovering ? 0.22 : 0.10),
                     lineWidth: isFocused ? 2.5 : 1
                 )
+                .shadow(color: isFocused ? Theme.accent.opacity(0.35) : .clear, radius: 8)
                 .allowsHitTesting(false)
         )
-        // Note: no auto-focus when playback starts — with multiview every ready tile
-        // would steal focus (focus thrash). The engine picks the primary channel instead.
+        .shadow(color: .black.opacity(0.25), radius: 4, y: 2)
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.15)) { isHovering = hovering }
+        }
+        .animation(.easeInOut(duration: 0.2), value: isFocused)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(accessibilityLabelText)
         .accessibilityHint(accessibilityHint)
@@ -152,38 +186,14 @@ struct ChannelTile: View {
             switch cell.state {
             case .playing(let url):
                 PlayerView(url: url)
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             case .probing(let target):
-                tappablePlaceholder { progress("Probing…", detail: target) }
+                tappablePlaceholder { progress("Connecting…", detail: target) }
             case .starting:
                 tappablePlaceholder { progress("Starting…") }
             case .tunneling:
                 tappablePlaceholder { progress("Opening tunnel…") }
             case .failed(let message):
-                VStack(spacing: 10) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
-                        .font(.title2)
-                        .accessibilityHidden(true)
-                    Text(message)
-                        .font(.caption2)
-                        .foregroundStyle(.orange)
-                        .multilineTextAlignment(.center)
-                        .lineLimit(4)
-                        .padding(.horizontal, 10)
-                    if onRestart != nil {
-                        Button {
-                            onRestart?()
-                        } label: {
-                            Label("Restart channel", systemImage: "arrow.clockwise")
-                        }
-                        .controlSize(.small)
-                        .disabled(isBusy)
-                        .accessibilityLabel("Restart channel \(cell.channel)")
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .contentShape(Rectangle())
+                failedContent(cell: cell, message: message)
             case .idle:
                 tappablePlaceholder {
                     idleSlot(channel: cell.channel, kind: .waiting)
@@ -193,10 +203,37 @@ struct ChannelTile: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         } else {
-            tappablePlaceholder {
-                idleSlot(channel: nil, kind: .empty)
+            idleSlot(channel: nil, kind: .empty)
+        }
+    }
+
+    private func failedContent(cell: StreamEngine.ChannelCell, message: String) -> some View {
+        VStack(spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(Theme.warning)
+                .font(.title2)
+                .accessibilityHidden(true)
+            Text(message)
+                .font(.caption2)
+                .foregroundStyle(Theme.warning)
+                .multilineTextAlignment(.center)
+                .lineLimit(3)
+                .padding(.horizontal, 10)
+            if onRestart != nil {
+                Button {
+                    onRestart?()
+                } label: {
+                    Label("Restart", systemImage: "arrow.clockwise")
+                        .font(.caption.weight(.semibold))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(isBusy)
+                .accessibilityLabel("Restart channel \(cell.channel)")
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .contentShape(Rectangle())
     }
 
     private func tappablePlaceholder<Content: View>(@ViewBuilder content: () -> Content) -> some View {
@@ -208,25 +245,17 @@ struct ChannelTile: View {
 
     private var channelBadge: some View {
         Text(badge ?? (cell.map { "CH \($0.channel)" } ?? "—"))
+            .font(.caption2.weight(.semibold))
             .lineLimit(1)
             .truncationMode(.middle)
-            .font(.caption.weight(.semibold))
+            .foregroundStyle(.white)
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
-            .background(.ultraThinMaterial, in: Capsule())
-            .foregroundStyle(.white)
+            .background(Capsule(style: .continuous).fill(.ultraThinMaterial))
+            .overlay(Capsule(style: .continuous).strokeBorder(Color.white.opacity(0.22), lineWidth: 0.5))
+            .shadow(color: .black.opacity(0.3), radius: 2, y: 1)
             .accessibilityLabel(cell.map { "Select channel \($0.channel)" } ?? "Empty slot")
             .accessibilityAddTraits(.isButton)
-    }
-
-    @ViewBuilder
-    private var statusDot: some View {
-        if let cell {
-            Circle()
-                .fill(statusColor(for: cell.state))
-                .frame(width: 8, height: 8)
-                .accessibilityHidden(true)
-        }
     }
 
     private enum IdleKind {
@@ -239,49 +268,52 @@ struct ChannelTile: View {
         VStack(spacing: 8) {
             Image(systemName: kind == .off ? "video.slash" : "video")
                 .font(.title2)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.neutral)
                 .accessibilityHidden(true)
             Text(channel.map { "Channel \($0)" } ?? "Empty")
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.textSecondary)
             switch kind {
             case .waiting:
-                Text("Waiting…")
+                Text("Ready · press Start")
                     .font(.caption2)
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(Theme.textTertiary)
             case .off:
                 Text("Not selected")
                     .font(.caption2)
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(Theme.textTertiary)
             case .empty:
                 EmptyView()
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(
+                    kind == .empty ? Theme.neutral.opacity(0.35) : Color.clear,
+                    style: StrokeStyle(lineWidth: 1, dash: [5, 4])
+                )
+        )
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onSelect)
     }
 
     private func progress(_ title: String, detail: String? = nil) -> some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 10) {
             ProgressView()
-                .controlSize(.small)
+                .controlSize(.regular)
+                .tint(Theme.accent)
             Text(title)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(Theme.textSecondary)
             if let detail {
                 Text(detail)
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(Theme.textTertiary)
                     .lineLimit(2)
-                    .padding(.horizontal, 10)
+                    .truncationMode(.middle)
+                    .padding(.horizontal, 12)
             }
-        }
-    }
-
-    private func statusColor(for state: StreamEngine.State) -> Color {
-        switch state {
-        case .playing: return .green
-        case .failed: return .orange
-        case .idle, .off: return .gray
-        case .starting, .probing, .tunneling: return .yellow
         }
     }
 

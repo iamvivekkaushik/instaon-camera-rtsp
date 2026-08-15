@@ -45,7 +45,11 @@ final class StreamPool: ObservableObject {
         Array(engines.values.flatMap(\.logLines).sorted().suffix(300))
     }
 
+    /// Bumped by stopAll() — multi-device start loops watch this and bail out.
+    private(set) var stopEpoch = 0
+
     func stopAll() {
+        stopEpoch += 1
         for engine in engines.values {
             engine.stop()
         }
