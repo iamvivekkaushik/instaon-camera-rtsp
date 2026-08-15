@@ -3,9 +3,12 @@ import SwiftUI
 struct MultiviewGrid: View {
     let cells: [StreamEngine.ChannelCell]
     let capacity: Int
-    let focusedChannel: Int?
+    /// Slot-index based (channels repeat across devices in the custom view).
+    let focusedSlot: Int?
     let onFocus: (Int) -> Void
     var onRestart: ((Int) -> Void)? = nil
+    /// Optional per-slot badge text (e.g. "Front Door · CH 3" in the custom view).
+    var badges: [String]? = nil
 
     private var columns: Int {
         switch capacity {
@@ -29,21 +32,15 @@ struct MultiviewGrid: View {
             ) {
                 ForEach(0..<capacity, id: \.self) { index in
                     let cell = index < cells.count ? cells[index] : nil
+                    let badge = badges.flatMap { index < $0.count ? $0[index] : nil }
                     ChannelTile(
                         cell: cell,
-                        isFocused: cell.map { $0.channel == focusedChannel } ?? false,
+                        badge: badge,
+                        isFocused: index == focusedSlot,
                         width: cellW,
                         height: cellH,
-                        onSelect: {
-                            if let ch = cell?.channel {
-                                onFocus(ch)
-                            }
-                        },
-                        onRestart: {
-                            if let ch = cell?.channel {
-                                onRestart?(ch)
-                            }
-                        }
+                        onSelect: { onFocus(index) },
+                        onRestart: { onRestart?(index) }
                     )
                 }
             }
@@ -56,6 +53,8 @@ struct MultiviewGrid: View {
 
 struct ChannelTile: View {
     let cell: StreamEngine.ChannelCell?
+    /// Custom badge text; defaults to "CH <n>".
+    var badge: String? = nil
     let isFocused: Bool
     let width: CGFloat
     let height: CGFloat
@@ -79,6 +78,13 @@ struct ChannelTile: View {
         }
     }
 
+    /// Show the small restart icon on every live tile (not just failed ones).
+    private var showRestart: Bool {
+        guard onRestart != nil, let cell else { return false }
+        if case .off = cell.state { return false }
+        return true
+    }
+
     var body: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -95,7 +101,7 @@ struct ChannelTile: View {
         }
         .overlay(alignment: .topTrailing) {
             HStack(spacing: 6) {
-                if isFailed, onRestart != nil {
+                if showRestart {
                     Button {
                         onRestart?()
                     } label: {
@@ -122,9 +128,8 @@ struct ChannelTile: View {
                 )
                 .allowsHitTesting(false)
         )
-        .onChange(of: isPlaying) { playing in
-            if playing { onSelect() }
-        }
+        // Note: no auto-focus when playback starts — with multiview every ready tile
+        // would steal focus (focus thrash). The engine picks the primary channel instead.
         .accessibilityElement(children: .contain)
         .accessibilityLabel(accessibilityLabelText)
         .accessibilityHint(accessibilityHint)
@@ -183,6 +188,9 @@ struct ChannelTile: View {
                 tappablePlaceholder {
                     idleSlot(channel: cell.channel, kind: .waiting)
                 }
+            case .off:
+                idleSlot(channel: cell.channel, kind: .off)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         } else {
             tappablePlaceholder {
@@ -199,7 +207,9 @@ struct ChannelTile: View {
     }
 
     private var channelBadge: some View {
-        Text(cell.map { "CH \($0.channel)" } ?? "—")
+        Text(badge ?? (cell.map { "CH \($0.channel)" } ?? "—"))
+            .lineLimit(1)
+            .truncationMode(.middle)
             .font(.caption.weight(.semibold))
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
@@ -270,7 +280,7 @@ struct ChannelTile: View {
         switch state {
         case .playing: return .green
         case .failed: return .orange
-        case .idle: return .gray
+        case .idle, .off: return .gray
         case .starting, .probing, .tunneling: return .yellow
         }
     }
@@ -282,6 +292,7 @@ struct ChannelTile: View {
         case .playing: status = "playing"
         case .failed: status = "failed"
         case .idle: status = "idle"
+        case .off: status = "not selected"
         case .starting: status = "starting"
         case .probing: status = "probing"
         case .tunneling: status = "tunneling"
@@ -293,6 +304,6 @@ struct ChannelTile: View {
 /// Placeholder cell used when a slot is unchecked / not playing.
 extension StreamEngine.ChannelCell {
     static func off(channel: Int) -> StreamEngine.ChannelCell {
-        StreamEngine.ChannelCell(channel: channel, state: .idle, activeRTSP: "")
+        StreamEngine.ChannelCell(channel: channel, state: .off, activeRTSP: "")
     }
 }

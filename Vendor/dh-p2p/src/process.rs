@@ -37,13 +37,19 @@ async fn ptcp_recv_and_ack(
     packet: crate::ptcp::PTCPPacket,
 ) -> crate::ptcp::PTCPPacket {
     let _wire = wire.lock().await;
-    let packet = session.lock().unwrap().recv(packet);
-    let p = session.lock().unwrap().send(PTCPBody::Empty);
-    socket.ptcp_request(p).await;
-    // Duplicate ACK: Empty ACKs are tiny UDP datagrams and loss freezes the
-    // agent's ~8KiB send window after PLAY (RTP stops around payload #12).
-    let p2 = session.lock().unwrap().send(PTCPBody::Empty);
-    socket.ptcp_request(p2).await;
+    // One session lock for recv + both ACKs: throughput is window/RTT, so every
+    // millisecond shaved off the ACK path directly buys media bandwidth.
+    let (packet, ack1, ack2) = {
+        let mut session = session.lock().unwrap();
+        let packet = session.recv(packet);
+        // Duplicate ACK: Empty ACKs are tiny UDP datagrams and loss freezes the
+        // agent's ~8KiB send window after PLAY (RTP stops around payload #12).
+        let ack1 = session.send(PTCPBody::Empty);
+        let ack2 = session.send(PTCPBody::Empty);
+        (packet, ack1, ack2)
+    };
+    socket.ptcp_request(ack1).await;
+    socket.ptcp_request(ack2).await;
     packet
 }
 

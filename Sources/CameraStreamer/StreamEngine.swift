@@ -1,10 +1,19 @@
 import Foundation
 import Combine
+import Network
+
+/// Boxes a non-Sendable value so it can cross into a detached escalation task.
+private final class SendableBox<T>: @unchecked Sendable {
+    var value: T
+    init(_ value: T) { self.value = value }
+}
 
 @MainActor
 final class StreamEngine: ObservableObject {
     enum State: Equatable {
         case idle
+        /// Grid slot exists but Play is unchecked — display only, never set by the engine.
+        case off
         case probing(String)
         case starting
         case tunneling
@@ -37,13 +46,15 @@ final class StreamEngine: ObservableObject {
         let username: String
         let password: String
         var subtype: Int
-        let channels: [Int]
+        var channels: [Int]
         let usesTunnel: Bool
         var relayTag: String
         var ffmpeg: String
         /// Direct RTSP only.
         var hostIP: String = ""
         var rtspPort: Int = 554
+        /// Per-channel Main(0)/Sub(1) — multiview can mix streams.
+        var subtypes: [Int: Int] = [:]
     }
 
     private var channelRestartTask: Task<Void, Never>?
@@ -66,8 +77,14 @@ final class StreamEngine: ObservableObject {
 
     private var pipelines: [Int: Pipeline] = [:]
     private var session: LiveSession?
-    private let tunnel = P2PTunnel(localPort: 1554)
+    private let tunnel: P2PTunnel
     private let fileManager = FileManager.default
+
+    /// One engine per device; each needs its own tunnel port so several devices
+    /// can stream at once in the custom view.
+    init(tunnelPort: Int = 1554) {
+        tunnel = P2PTunnel(localPort: tunnelPort)
+    }
 
     var isBusy: Bool {
         switch state {
@@ -110,12 +127,14 @@ final class StreamEngine: ObservableObject {
     /// Start live view for one or more channels simultaneously.
     /// P2P/relay: one shared tunnel, concurrent local RTSP clients (dh-p2p multi-realm).
     /// Direct RTSP: concurrent WAN/LAN clients.
+    /// `channelSubtypes` overrides the global `subtype` per channel (nil values fall back).
     func start(
         device: DeviceLookupResult,
         username: String,
         password: String,
         channels: [Int],
         subtype: Int,
+        channelSubtypes: [Int: Int] = [:],
         preferredChannel: Int? = nil
     ) async {
         stop()
@@ -145,9 +164,12 @@ final class StreamEngine: ObservableObject {
         let modes: [StreamMode]
         switch mode {
         case .auto:
+            // Speed first, reliability fallback: direct RTSP has no relay window
+            // cap (best for multiview), relay works almost anywhere, direct P2P
+            // (hole-punch, low RTT when it connects) is the last resort.
             modes = prefersP2P
                 ? [.p2pRelay, .p2p]
-                : [.p2pRelay, .p2p, .directRTSP]
+                : [.directRTSP, .p2pRelay, .p2p]
         default:
             modes = [mode]
         }
@@ -166,6 +188,7 @@ final class StreamEngine: ObservableObject {
                     password: password,
                     channels: ordered,
                     subtype: subtype,
+                    channelSubtypes: channelSubtypes,
                     ffmpeg: ffmpeg
                 ) {
                     return
@@ -178,6 +201,7 @@ final class StreamEngine: ObservableObject {
                     password: password,
                     channels: ordered,
                     subtype: subtype,
+                    channelSubtypes: channelSubtypes,
                     ffmpeg: ffmpeg
                 ) {
                     return
@@ -235,7 +259,8 @@ final class StreamEngine: ObservableObject {
     }
 
     /// Restart a single failed (or stale) channel without tearing down others / the tunnel.
-    func restartChannel(_ channel: Int) async {
+    /// If `subtype` is given, restart that channel with that stream (Main=0/Sub=1).
+    func restartChannel(_ channel: Int, subtype: Int? = nil) async {
         guard let session else {
             appendLog("Cannot restart channel \(channel) — start a session first")
             return
@@ -248,13 +273,13 @@ final class StreamEngine: ObservableObject {
         // Serialize restarts so Bind handshakes do not pile up.
         channelRestartTask?.cancel()
         let task = Task { @MainActor in
-            await self.performRestartChannel(channel)
+            await self.performRestartChannel(channel, preferredSubtype: subtype)
         }
         channelRestartTask = task
         await task.value
     }
 
-    private func performRestartChannel(_ channel: Int) async {
+    private func performRestartChannel(_ channel: Int, preferredSubtype: Int? = nil) async {
         guard let session else { return }
         if Task.isCancelled { return }
 
@@ -269,8 +294,16 @@ final class StreamEngine: ObservableObject {
         }
         updateCell(channel, state: .starting, rtsp: "")
 
-        var subtypeOrder = [session.subtype]
-        let alternate = session.subtype == 0 ? 1 : 0
+        if let preferredSubtype {
+            // User changed this channel's Main/Sub selection — honor it.
+            self.session?.subtypes[channel] = preferredSubtype
+            appendLog(
+                "Channel \(channel) stream changed to \(preferredSubtype == 0 ? "Main" : "Sub")"
+            )
+        }
+        let base = self.session?.subtypes[channel] ?? session.subtype
+        var subtypeOrder = [base]
+        let alternate = base == 0 ? 1 : 0
         if !subtypeOrder.contains(alternate) {
             subtypeOrder.append(alternate)
         }
@@ -297,20 +330,10 @@ final class StreamEngine: ObservableObject {
                 if ok {
                     if var sess = self.session {
                         if !sess.channels.contains(channel) {
-                            sess = LiveSession(
-                                username: sess.username,
-                                password: sess.password,
-                                subtype: sub,
-                                channels: sess.channels + [channel],
-                                usesTunnel: sess.usesTunnel,
-                                relayTag: sess.relayTag,
-                                ffmpeg: sess.ffmpeg,
-                                hostIP: sess.hostIP,
-                                rtspPort: sess.rtspPort
-                            )
-                        } else {
-                            sess.subtype = sub
+                            sess.channels.append(channel)
                         }
+                        sess.subtype = sub
+                        sess.subtypes[channel] = sub
                         self.session = sess
                     }
                     syncAggregateState()
@@ -433,15 +456,28 @@ final class StreamEngine: ObservableObject {
         password: String,
         channels: [Int],
         subtype: Int,
+        channelSubtypes: [Int: Int],
         ffmpeg: String
     ) async -> Bool {
         let port = device.rtspPort
         let ip = device.ipAddress
 
+        // Fast-fail: without this, a closed/blocked port costs up to ~12s x 7
+        // candidate URLs per channel in probeRTSP before Auto can move on.
+        guard !ip.isEmpty else {
+            appendLog("Direct RTSP skipped — device has no IP address")
+            return false
+        }
+        guard await Self.tcpConnectable(ip: ip, port: port, timeout: 2.5) else {
+            appendLog("Direct RTSP skipped — \(ip):\(port) not reachable")
+            return false
+        }
+
         // Launch every channel's HLS pipeline, then wait for readiness (true parallel streaming).
         var launched: [PendingLaunch] = []
 
         for channel in channels {
+            let channelSubtype = channelSubtypes[channel] ?? subtype
             updateCell(channel, state: .probing("ch\(channel)"), rtsp: "")
             let candidates = StreamURLBuilder.candidates(
                 ip: ip,
@@ -449,7 +485,7 @@ final class StreamEngine: ObservableObject {
                 username: username,
                 password: password,
                 channel: channel,
-                subtype: subtype
+                subtype: channelSubtype
             )
             var launchedThis = false
             for url in candidates {
@@ -461,13 +497,13 @@ final class StreamEngine: ObservableObject {
                             channel: channel,
                             ffmpegPath: ffmpeg,
                             rtspURL: url,
-                            subtype: subtype
+                            subtype: channelSubtype
                         )
                         launched.append(
                             PendingLaunch(
                                 channel: channel,
                                 redacted: redacted,
-                                subtype: subtype,
+                                subtype: channelSubtype,
                                 playlistFile: handle.playlistFile,
                                 dir: handle.dir,
                                 server: handle.server,
@@ -499,7 +535,8 @@ final class StreamEngine: ObservableObject {
                 relayTag: "Direct RTSP",
                 ffmpeg: ffmpeg,
                 hostIP: ip,
-                rtspPort: port
+                rtspPort: port,
+                subtypes: Dictionary(uniqueKeysWithValues: channels.map { ($0, channelSubtypes[$0] ?? subtype) })
             )
             syncAggregateState()
             return true
@@ -514,6 +551,7 @@ final class StreamEngine: ObservableObject {
         password: String,
         channels: [Int],
         subtype: Int,
+        channelSubtypes: [Int: Int],
         ffmpeg: String
     ) async -> Bool {
         state = .tunneling
@@ -525,20 +563,36 @@ final class StreamEngine: ObservableObject {
         }
 
         let clouds = ["instaon"]
-        // Prefer the UI stream choice; fall back to the other if HLS fails.
-        // (Main can hang DESCRIBE on some NVRs — fallback restarts the tunnel.)
-        var subtypeOrder = [subtype]
-        let alternate = subtype == 0 ? 1 : 0
-        if !subtypeOrder.contains(alternate) {
-            subtypeOrder.append(alternate)
+        // Per-channel stream selection: each channel runs its chosen stream first;
+        // if its HLS never settles, the retry round uses the alternate stream.
+        // (Hung Main can leave the PTCP realm unusable — that round restarts the tunnel.)
+        let resolvedSubtypes: [Int: Int] = Dictionary(
+            uniqueKeysWithValues: channels.map {
+                let override = channelSubtypes[$0] ?? subtype
+                return ($0, override == 0 ? 0 : 1)
+            }
+        )
+        let mainCount = resolvedSubtypes.values.filter { $0 == 0 }.count
+        let subCount = resolvedSubtypes.count - mainCount
+
+        let multiviewTunnel = channels.count > 1
+        if multiviewTunnel && mainCount > 0 {
+            // Respect Main selections, but warn: many Main streams share the
+            // tunnel's single ~8KiB window (aggregate = window/RTT), so concurrent
+            // RTSP handshakes can congest it. Sub is the reliable choice.
+            appendLog(
+                "Warning: Main stream for \(mainCount) of \(channels.count) channels over one tunnel — may timeout/freeze if the shared relay window saturates (Sub is recommended)"
+            )
         }
-        if subtype == 0 {
+        if mainCount > 0, subCount > 0 {
+            appendLog("Mixed streams: \(mainCount) Main, \(subCount) Sub (per channel, with per-channel fallback)")
+        } else if mainCount > 0 {
             appendLog("Using Main stream (will fall back to Sub if Main fails over the tunnel)")
         } else {
             appendLog("Using Sub stream (will fall back to Main if Sub fails)")
         }
 
-        if channels.count > 1 {
+        if multiviewTunnel {
             appendLog(
                 "P2P multiview: starting \(channels.count) concurrent RTSP clients on one tunnel (channels \(channels.map(String.init).joined(separator: ", ")))"
             )
@@ -576,13 +630,15 @@ final class StreamEngine: ObservableObject {
                 relayTag: relayTag,
                 ffmpeg: ffmpeg,
                 hostIP: "",
-                rtspPort: 554
+                rtspPort: 554,
+                subtypes: resolvedSubtypes
             )
 
             var anyPlaying = false
             var remaining = channels
 
-            for sub in subtypeOrder where !remaining.isEmpty {
+            // Round 0: each channel's chosen stream. Round 1: the alternate per channel.
+            for round in 0...1 where !remaining.isEmpty {
                 if !tunnel.isRunning {
                     appendLog("Tunnel exited mid-start — restarting…")
                     do {
@@ -600,9 +656,14 @@ final class StreamEngine: ObservableObject {
 
                 for (index, channel) in remaining.enumerated() {
                     if index > 0 {
-                        try? await Task.sleep(nanoseconds: 250_000_000)
+                        // Bind→CONN is serialized inside dh-p2p; a short stagger only
+                        // avoids accept bursts, it does not need to be conservative.
+                        try? await Task.sleep(nanoseconds: 120_000_000)
                     }
                     if !tunnel.isRunning { break }
+
+                    let chosen = resolvedSubtypes[channel] ?? subtype
+                    let sub = round == 0 ? chosen : (chosen == 0 ? 1 : 0)
 
                     guard let url = StreamURLBuilder.localTunnelURL(
                         port: port,
@@ -651,7 +712,13 @@ final class StreamEngine: ObservableObject {
                 if readyCount {
                     anyPlaying = true
                     if var sess = session {
-                        sess.subtype = sub
+                        // Record the stream that actually worked per channel.
+                        for launch in launched {
+                            if let cell = cells.first(where: { $0.channel == launch.channel }),
+                               case .playing = cell.state {
+                                sess.subtypes[launch.channel] = launch.subtype
+                            }
+                        }
                         session = sess
                     }
                 }
@@ -663,7 +730,7 @@ final class StreamEngine: ObservableObject {
                     return true
                 }
 
-                if !remaining.isEmpty && sub != subtypeOrder.last {
+                if !remaining.isEmpty && round == 0 {
                     appendLog(
                         "Retrying channels \(remaining.map(String.init).joined(separator: ",")) with alternate stream…"
                     )
@@ -859,7 +926,9 @@ final class StreamEngine: ObservableObject {
         ]
 
         let err = Pipe()
-        process.standardOutput = Pipe()
+        // ffmpeg logs to stderr (drained below); stdout is unused, so discard it —
+        // a filled, undrained pipe (64KB) would silently deadlock the encoder.
+        process.standardOutput = FileHandle.nullDevice
         process.standardError = err
         try process.run()
 
@@ -973,15 +1042,72 @@ final class StreamEngine: ObservableObject {
         pipeline.hlsServer = nil
         if let process = pipeline.ffmpegProcess {
             pipeline.ffmpegProcess = nil
+            let hlsDir = pipeline.hlsDirectory
+            pipeline.hlsDirectory = nil
             if process.isRunning {
+                // Only delete the temp dir once ffmpeg has actually exited, otherwise
+                // it can recreate segments in the deleted dir / linger as a zombie.
+                // Escalate to SIGKILL if it ignores SIGTERM.
                 process.terminate()
+                // Process/FileManager are not Sendable; box them — only this
+                // detached task touches the process from here on.
+                let box = SendableBox(process)
+                Task.detached {
+                    let process = box.value
+                    let deadline = Date().addingTimeInterval(2)
+                    while process.isRunning, Date() < deadline {
+                        try? await Task.sleep(nanoseconds: 100_000_000)
+                    }
+                    if process.isRunning {
+                        kill(process.processIdentifier, SIGKILL)
+                    }
+                    process.waitUntilExit() // reap the child
+                    if let hlsDir {
+                        try? FileManager.default.removeItem(at: hlsDir)
+                    }
+                }
+            } else if let hlsDir {
+                try? fileManager.removeItem(at: hlsDir)
+            }
+        } else if let dir = pipeline.hlsDirectory {
+            try? fileManager.removeItem(at: dir)
+            pipeline.hlsDirectory = nil
+        }
+        pipelines.removeValue(forKey: channel)
+    }
+
+    /// Quick TCP connect check — much cheaper than an ffmpeg RTSP probe when the
+    /// port is firewalled/closed (the common case for WAN device IPs).
+    nonisolated private static func tcpConnectable(ip: String, port: Int, timeout: TimeInterval) async -> Bool {
+        guard let nwPort = NWEndpoint.Port(rawValue: UInt16(clamping: port)) else { return false }
+        return await withCheckedContinuation { continuation in
+            let connection = NWConnection(host: NWEndpoint.Host(ip), port: nwPort, using: .tcp)
+            let connBox = SendableBox(connection)
+            let once = SendableBox(false)
+            let lock = SendableBox(NSLock())
+            let finish: @Sendable (Bool) -> Void = { value in
+                lock.value.lock()
+                defer { lock.value.unlock() }
+                guard !once.value else { return }
+                once.value = true
+                connBox.value.cancel()
+                continuation.resume(returning: value)
+            }
+            connection.stateUpdateHandler = { state in
+                switch state {
+                case .ready:
+                    finish(true)
+                case .failed, .cancelled:
+                    finish(false)
+                default:
+                    break
+                }
+            }
+            connection.start(queue: DispatchQueue(label: "CameraStreamer.tcpProbe"))
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
+                finish(false)
             }
         }
-        if let dir = pipeline.hlsDirectory {
-            try? fileManager.removeItem(at: dir)
-        }
-        pipeline.hlsDirectory = nil
-        pipelines.removeValue(forKey: channel)
     }
 
     private func probeRTSP(ffmpeg: String, url: URL) async -> Bool {
@@ -995,8 +1121,10 @@ final class StreamEngine: ObservableObject {
                 "-t", "2",
                 "-f", "null", "-"
             ]
-            process.standardOutput = Pipe()
-            process.standardError = Pipe()
+            // Probing only needs the exit status — discard output so the pipes
+            // can never fill up and wedge the child.
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
             do {
                 try process.run()
             } catch {
@@ -1004,21 +1132,21 @@ final class StreamEngine: ObservableObject {
                 return
             }
 
-            let box = process
+            let box = SendableBox(process)
             DispatchQueue.global().async {
-                let group = DispatchGroup()
-                group.enter()
+                let group = SendableBox(DispatchGroup())
+                group.value.enter()
                 DispatchQueue.global().async {
-                    box.waitUntilExit()
-                    group.leave()
+                    box.value.waitUntilExit()
+                    group.value.leave()
                 }
-                let timedOut = group.wait(timeout: .now() + 12) == .timedOut
-                if timedOut, box.isRunning {
-                    box.terminate()
-                    box.waitUntilExit()
+                let timedOut = group.value.wait(timeout: .now() + 12) == .timedOut
+                if timedOut, box.value.isRunning {
+                    box.value.terminate()
+                    box.value.waitUntilExit()
                     continuation.resume(returning: false)
                 } else {
-                    continuation.resume(returning: box.terminationStatus == 0)
+                    continuation.resume(returning: box.value.terminationStatus == 0)
                 }
             }
         }
@@ -1050,8 +1178,11 @@ final class StreamEngine: ObservableObject {
         return found >= minSegments
     }
 
+    /// Date formatters are expensive to allocate — reuse one.
+    nonisolated private static let logTimestampFormatter = ISO8601DateFormatter()
+
     private func appendLog(_ line: String) {
-        let stamp = ISO8601DateFormatter().string(from: Date())
+        let stamp = Self.logTimestampFormatter.string(from: Date())
         logLines.append("[\(stamp)] \(line)")
         if logLines.count > 300 {
             logLines.removeFirst(logLines.count - 300)

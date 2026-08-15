@@ -1,5 +1,48 @@
 import Foundation
 
+/// A saved device: credentials + serial. Password lives in the Keychain (keyed by id).
+struct DeviceProfile: Identifiable, Codable, Equatable {
+    var id: UUID = UUID()
+    var name: String = ""
+    var serial: String = ""
+    var username: String = "admin"
+
+    var displayName: String {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        if !trimmed.isEmpty { return trimmed }
+        let sn = serial.trimmingCharacters(in: .whitespaces)
+        return sn.isEmpty ? "Unnamed camera" : sn
+    }
+}
+
+/// One tile of the custom view: any channel of any saved device.
+struct CustomSlot: Codable, Equatable {
+    var profileID: UUID?
+    var channel: Int
+    /// 0 = main, 1 = sub (Defaults to 1 for slots persisted before this field existed).
+    var subtype: Int
+
+    init(profileID: UUID?, channel: Int, subtype: Int = 1) {
+        self.profileID = profileID
+        self.channel = channel
+        self.subtype = subtype
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        profileID = try container.decodeIfPresent(UUID.self, forKey: .profileID)
+        channel = try container.decode(Int.self, forKey: .channel)
+        subtype = try container.decodeIfPresent(Int.self, forKey: .subtype) ?? 1
+    }
+}
+
+enum LiveViewMode: String, CaseIterable, Identifiable {
+    case device = "Device"
+    case custom = "Custom"
+
+    var id: String { rawValue }
+}
+
 struct DeviceLookupResult: Equatable {
     let serial: String
     let ipAddress: String

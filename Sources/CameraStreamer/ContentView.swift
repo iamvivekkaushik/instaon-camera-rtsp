@@ -1,16 +1,15 @@
 import SwiftUI
 
 struct ContentView: View {
-    @StateObject private var stream = StreamEngine()
+    @StateObject private var pool = StreamPool()
     @ObservedObject private var settings = AppSettings.shared
 
-    @State private var device: DeviceLookupResult?
+    @State private var deviceResults: [UUID: DeviceLookupResult] = [:]
     @State private var isLookingUp = false
     @State private var statusMessage =
-        "Enter device credentials, pick channels, then Start. Credentials are saved in Settings."
-    @State private var showPassword = false
+        "Pick a camera profile (or build a Custom view), then Start. Credentials are saved in Settings."
     @State private var showSettings = false
-    @State private var focusedChannel: Int?
+    @State private var focusedSlot: Int?
     @State private var channelDrafts: [String] = []
 
     private let client = InstaOnClient()
@@ -44,20 +43,23 @@ struct ContentView: View {
         .animation(.easeInOut(duration: 0.22), value: settings.showLogs)
         .onAppear {
             settings.ensureChannelSlots(count: settings.gridCapacity)
+            settings.ensureCustomSlots(count: settings.gridCapacity)
             syncChannelDrafts()
-            stream.mode = settings.streamMode
         }
         .onChange(of: settings.gridCapacity) { capacity in
             settings.ensureChannelSlots(count: capacity)
+            settings.ensureCustomSlots(count: capacity)
             syncChannelDrafts()
         }
         .onChange(of: settings.channels) { _ in
             syncChannelDrafts()
         }
-        .onChange(of: settings.streamMode) { mode in
-            stream.mode = mode
+        .onDisappear { pool.stopAll() }
+        // onDisappear is not guaranteed on Cmd+Q — make sure ffmpeg/dh-p2p children
+        // never outlive the app.
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+            pool.stopAll()
         }
-        .onDisappear { stream.stop() }
         .sheet(isPresented: $showSettings) {
             VStack(spacing: 0) {
                 HStack {
@@ -71,7 +73,7 @@ struct ContentView: View {
                 Divider()
                 SettingsView(settings: settings)
             }
-            .frame(minWidth: 460, minHeight: 420)
+            .frame(minWidth: 460, minHeight: 500)
         }
     }
 
@@ -109,7 +111,7 @@ struct ContentView: View {
             } label: {
                 Label("Settings", systemImage: "gearshape")
             }
-            .help("Saved credentials and defaults")
+            .help("Device profiles and saved defaults")
             .accessibilityLabel("Open settings")
         }
     }
@@ -131,92 +133,27 @@ struct ContentView: View {
     private var controlPanel: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                GroupBox {
-                    VStack(alignment: .leading, spacing: 10) {
-                        labeledField("InstaOn ID", accessibility: "Device serial") {
-                            TextField("Device serial", text: $settings.serial)
-                                .textFieldStyle(.roundedBorder)
-                        }
-                        labeledField("Username", accessibility: "Device username") {
-                            TextField("admin", text: $settings.username)
-                                .textFieldStyle(.roundedBorder)
-                        }
-                        labeledField("Password", accessibility: "Device password") {
-                            HStack(spacing: 6) {
-                                Group {
-                                    if showPassword {
-                                        TextField("Device password", text: $settings.password)
-                                    } else {
-                                        SecureField("Device password", text: $settings.password)
-                                    }
-                                }
-                                .textFieldStyle(.roundedBorder)
-
-                                Toggle(isOn: $showPassword) {
-                                    Image(systemName: showPassword ? "eye.slash" : "eye")
-                                }
-                                .toggleStyle(.button)
-                                .buttonStyle(.borderless)
-                                .help(showPassword ? "Hide password" : "Show password")
-                                .accessibilityLabel(showPassword ? "Hide password" : "Show password")
-                            }
-                        }
-
-                        Text("Saved automatically for next launch.")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
+                Picker("View", selection: $settings.viewMode) {
+                    ForEach(LiveViewMode.allCases) { mode in
+                        Text(mode.rawValue).tag(mode)
                     }
-                    .padding(4)
-                } label: {
-                    Label("Device", systemImage: "video.fill")
+                }
+                .pickerStyle(.segmented)
+                .help("Device: one camera, many channels. Custom: mix devices/channels.")
+                .accessibilityLabel("Live view mode")
+
+                if settings.viewMode == .device {
+                    deviceSection
+                    channelSection
+                } else {
+                    customSection
                 }
 
-                GroupBox {
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack {
-                            Text("Channels in grid")
-                                .font(.subheadline.weight(.medium))
-                                .accessibilityAddTraits(.isHeader)
-                            Spacer()
-                            Button("All") { settings.setAllSlotsEnabled(true) }
-                                .controlSize(.small)
-                                .help("Enable all slots for playback")
-                            Button("None") { settings.setAllSlotsEnabled(false) }
-                                .controlSize(.small)
-                                .help("Disable all slots")
-                        }
-
-                        Text("Check Play for each slot included when you press Start.")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-
-                        channelEditors
-
-                        HStack {
-                            Picker("Stream", selection: $settings.subtype) {
-                                Text("Sub").tag(1)
-                                Text("Main").tag(0)
-                            }
-                            .pickerStyle(.segmented)
-                            .accessibilityLabel("Stream quality Main or Sub")
-                            .help("Sub is more reliable over P2P, especially in multiview")
-                        }
-
-                        Picker("Mode", selection: $settings.streamMode) {
-                            ForEach(StreamMode.allCases) { mode in
-                                Text(mode.rawValue).tag(mode)
-                            }
-                        }
-                        .accessibilityLabel("Connection mode")
-                    }
-                    .padding(4)
-                } label: {
-                    Label("Multiview", systemImage: "square.grid.2x2")
-                }
+                streamDefaultsSection
 
                 actionButtons
 
-                if let device {
+                if let device = selectedDeviceResult {
                     GroupBox {
                         Text(device.summary)
                             .font(.system(.caption, design: .monospaced))
@@ -242,12 +179,168 @@ struct ContentView: View {
                     Label("Status", systemImage: "info.circle")
                 }
 
-                Text("Close gCMOB while streaming. Prefer Sub for multiview. Check Play only for cameras you want; use Restart on a failed tile.")
+                Text("Close gCMOB while streaming. Prefer Sub for multiview. Use Restart on a failed tile.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(.trailing, 4)
+        }
+    }
+
+    private var deviceSection: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 10) {
+                Picker("Camera", selection: $settings.selectedProfileID) {
+                    ForEach(settings.profiles) { profile in
+                        Text(profile.displayName).tag(profile.id as UUID?)
+                    }
+                }
+                .accessibilityLabel("Selected camera profile")
+                .help("Saved device profiles — edit credentials in Settings")
+
+                if let profile = settings.selectedProfile {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(profile.serial.isEmpty ? profile.displayName : profile.serial)
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.secondary)
+                        Text("Edit credentials in Settings.")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                        if settings.password(for: profile.id).isEmpty {
+                            Label("No password saved — set it in Settings.", systemImage: "exclamationmark.triangle.fill")
+                                .font(.caption2)
+                                .foregroundStyle(.orange)
+                        }
+                    }
+                } else {
+                    HStack {
+                        Text("No camera profiles yet.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Add Profile") {
+                            _ = settings.addProfile()
+                        }
+                        .controlSize(.small)
+                    }
+                }
+            }
+            .padding(4)
+        } label: {
+            Label("Device", systemImage: "video.fill")
+        }
+    }
+
+    private var channelSection: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text("Channels in grid")
+                        .font(.subheadline.weight(.medium))
+                        .accessibilityAddTraits(.isHeader)
+                    Spacer()
+                    Button("All") { settings.setAllSlotsEnabled(true) }
+                        .controlSize(.small)
+                        .help("Enable all slots for playback")
+                    Button("None") { settings.setAllSlotsEnabled(false) }
+                        .controlSize(.small)
+                        .help("Disable all slots")
+                }
+
+                Text("Check Play for each slot included when you press Start.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+
+                HStack {
+                    Text("All streams")
+                        .font(.subheadline.weight(.medium))
+                    Picker("All streams", selection: Binding(
+                        get: { settings.subtype },
+                        set: { onAllStreamsChange($0) }
+                    )) {
+                        Text("Sub").tag(1)
+                        Text("Main").tag(0)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .accessibilityLabel("Apply stream quality to all slots")
+                    .help("Sets Main/Sub for every slot")
+                }
+
+                channelEditors
+            }
+            .padding(4)
+        } label: {
+            Label("Multiview", systemImage: "square.grid.2x2")
+        }
+    }
+
+    private var customSection: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Each tile: pick a device and a channel. Press Start to open one tunnel per device.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                ForEach(0..<settings.gridCapacity, id: \.self) { index in
+                    HStack(spacing: 8) {
+                        Text("\(index + 1)")
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                            .frame(width: 14, alignment: .trailing)
+
+                        Picker("Device", selection: customProfileBinding(index)) {
+                            Text("—").tag(UUID?.none)
+                            ForEach(settings.profiles) { profile in
+                                Text(profile.displayName).tag(profile.id as UUID?)
+                            }
+                        }
+                        .labelsHidden()
+                        .accessibilityLabel("Device for custom slot \(index + 1)")
+
+                        TextField("CH", text: customChannelBinding(index))
+                            .textFieldStyle(.roundedBorder)
+                            .frame(maxWidth: 56)
+                            .accessibilityLabel("Channel for custom slot \(index + 1)")
+
+                        Picker("Stream for custom slot \(index + 1)", selection: Binding(
+                            get: {
+                                let slots = settings.customSlots
+                                guard index < slots.count else { return settings.subtype }
+                                return slots[index].subtype
+                            },
+                            set: { onCustomSlotSubtypeChange(index, $0) }
+                        )) {
+                            Text("Sub").tag(1)
+                            Text("Main").tag(0)
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .controlSize(.mini)
+                        .frame(maxWidth: 96)
+                        .accessibilityLabel("Stream quality for custom slot \(index + 1)")
+                    }
+                }
+            }
+            .padding(4)
+        } label: {
+            Label("Custom view", systemImage: "rectangle.grid.2x2")
+        }
+    }
+
+    private var streamDefaultsSection: some View {
+        GroupBox {
+            Picker("Mode", selection: $settings.streamMode) {
+                ForEach(StreamMode.allCases) { mode in
+                    Text(mode.rawValue).tag(mode)
+                }
+            }
+            .accessibilityLabel("Connection mode")
+            .padding(4)
+        } label: {
+            Label("Streaming", systemImage: "antenna.radiowaves.left.and.right")
         }
     }
 
@@ -281,12 +374,19 @@ struct ContentView: View {
                             .frame(maxWidth: 64)
                             .accessibilityLabel("Channel number for slot \(index + 1)")
                             .onSubmit { commitChannelDrafts() }
-
-                            Text("Play")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                                .accessibilityHidden(true)
                         }
+
+                        Picker("Stream for slot \(index + 1)", selection: Binding(
+                            get: { settings.slotSubtype(at: index) },
+                            set: { onSlotSubtypeChange(index, $0) }
+                        )) {
+                            Text("Sub").tag(1)
+                            Text("Main").tag(0)
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .controlSize(.mini)
+                        .accessibilityLabel("Stream quality for slot \(index + 1)")
                     }
                     .padding(8)
                     .background(
@@ -313,7 +413,7 @@ struct ContentView: View {
                     Text("Look Up")
                 }
             }
-            .disabled(isLookingUp || serialTrimmed.isEmpty)
+            .disabled(isLookingUp || settings.viewMode != .device || selectedSerialTrimmed.isEmpty)
             .keyboardShortcut("l", modifiers: [.command])
             .help("Query InstaOn for device metadata")
             .accessibilityLabel("Look up device")
@@ -328,12 +428,12 @@ struct ContentView: View {
             .accessibilityLabel("Start stream")
 
             Button("Stop") {
-                stream.stop()
+                pool.stopAll()
                 statusMessage = "Stopped."
             }
-            .disabled(!stream.isBusy && !stream.isPlaying)
+            .disabled(!pool.isBusy && !pool.isPlaying)
             .keyboardShortcut(".", modifiers: [.command])
-            .help("Stop all streams and tunnel")
+            .help("Stop all streams and tunnels")
             .accessibilityLabel("Stop stream")
         }
         .controlSize(.large)
@@ -346,15 +446,16 @@ struct ContentView: View {
             MultiviewGrid(
                 cells: displayCells,
                 capacity: settings.gridCapacity,
-                focusedChannel: stream.liveChannel ?? focusedChannel,
-                onFocus: { channel in
-                    focusedChannel = channel
-                    Task { await selectChannel(channel) }
+                focusedSlot: focusedSlot,
+                onFocus: { index in
+                    focusedSlot = index
+                    Task { await selectSlot(index) }
                 },
-                onRestart: { channel in
-                    focusedChannel = channel
-                    Task { await restartChannel(channel) }
-                }
+                onRestart: { index in
+                    focusedSlot = index
+                    Task { await restartSlot(index) }
+                },
+                badges: tileBadges
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(
@@ -363,8 +464,8 @@ struct ContentView: View {
             )
             .padding(2)
 
-            if !stream.activeRTSP.isEmpty {
-                Text(stream.activeRTSP)
+            if !focusedActiveRTSP.isEmpty {
+                Text(focusedActiveRTSP)
                     .font(.caption2.monospaced())
                     .lineLimit(2)
                     .textSelection(.enabled)
@@ -377,20 +478,83 @@ struct ContentView: View {
         .accessibilityElement(children: .contain)
     }
 
-    /// Grid slots: live engine cells for checked channels; placeholders for unchecked.
+    private func profileFor(_ id: UUID) -> DeviceProfile? {
+        settings.profiles.first { $0.id == id }
+    }
+
+    /// Engine lookups route through the device SERIAL so two profiles pointing
+    /// at the same physical device share one engine/tunnel.
+    private func engineFor(_ profile: DeviceProfile) -> StreamEngine {
+        pool.engine(forSerial: profile.serial, fallbackID: profile.id)
+    }
+
+    private func engineIfPresentFor(_ profile: DeviceProfile) -> StreamEngine? {
+        pool.engineIfPresent(forSerial: profile.serial, fallbackID: profile.id)
+    }
+
+    /// Read-only slot → (profileID, channel) mapping (safe to call during body).
+    private func slotMapping(_ index: Int) -> (profileID: UUID, channel: Int)? {
+        switch settings.viewMode {
+        case .device:
+            guard let profile = settings.selectedProfile else { return nil }
+            let channels = settings.gridChannels
+            guard index < channels.count else { return nil }
+            return (profile.id, channels[index])
+        case .custom:
+            let slots = Array(settings.customSlots.prefix(settings.gridCapacity))
+            guard index < slots.count, let pid = slots[index].profileID else { return nil }
+            return (pid, slots[index].channel)
+        }
+    }
+
+    /// Grid slots: live engine cells where streaming, placeholders otherwise.
     private var displayCells: [StreamEngine.ChannelCell] {
-        let grid = settings.gridChannels
-        let enabled = Array(settings.channelEnabled.prefix(settings.gridCapacity))
-        return grid.enumerated().map { index, channel in
-            let isOn = index < enabled.count ? enabled[index] : true
-            if !isOn {
+        switch settings.viewMode {
+        case .device:
+            let grid = settings.gridChannels
+            let enabled = Array(settings.channelEnabled.prefix(settings.gridCapacity))
+            let engineCells = settings.selectedProfile.flatMap { engineIfPresentFor($0)?.cells } ?? []
+            return grid.enumerated().map { index, channel in
+                let isOn = index < enabled.count ? enabled[index] : true
+                if !isOn {
+                    return StreamEngine.ChannelCell(channel: channel, state: .off, activeRTSP: "")
+                }
+                if let live = engineCells.first(where: { $0.channel == channel }) {
+                    return live
+                }
                 return StreamEngine.ChannelCell(channel: channel, state: .idle, activeRTSP: "")
             }
-            if let live = stream.cells.first(where: { $0.channel == channel }) {
-                return live
+        case .custom:
+            let slots = Array(settings.customSlots.prefix(settings.gridCapacity))
+            return slots.enumerated().map { _, slot in
+                guard let pid = slot.profileID,
+                      let profile = profileFor(pid) else {
+                    return StreamEngine.ChannelCell(channel: slot.channel, state: .off, activeRTSP: "")
+                }
+                if let live = engineIfPresentFor(profile)?.cells.first(where: { $0.channel == slot.channel }) {
+                    return live
+                }
+                return StreamEngine.ChannelCell(channel: slot.channel, state: .idle, activeRTSP: "")
             }
-            return StreamEngine.ChannelCell(channel: channel, state: .idle, activeRTSP: "")
         }
+    }
+
+    private var tileBadges: [String]? {
+        guard settings.viewMode == .custom else { return nil }
+        let slots = Array(settings.customSlots.prefix(settings.gridCapacity))
+        return slots.map { slot in
+            guard let pid = slot.profileID,
+                  let profile = settings.profiles.first(where: { $0.id == pid }) else {
+                return "Empty slot"
+            }
+            return "\(profile.displayName) · CH \(slot.channel)"
+        }
+    }
+
+    private var focusedActiveRTSP: String {
+        guard let index = focusedSlot, let mapping = slotMapping(index),
+              let profile = profileFor(mapping.profileID) else { return "" }
+        return engineIfPresentFor(profile)?.activeRTSP ?? ""
     }
 
     // MARK: - Logs
@@ -414,71 +578,91 @@ struct ContentView: View {
             .padding(.horizontal, 12)
             .padding(.top, 8)
 
-            ScrollViewReader { proxy in
-                ScrollView {
-                    Text(statusText)
-                        .font(.system(.caption, design: .monospaced))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
-                        .padding(10)
-                        .id("logBottom")
-                }
+            LogTextView(text: statusText)
                 .background(Color(nsColor: .textBackgroundColor).opacity(0.55))
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                 .padding(.horizontal, 12)
                 .padding(.bottom, 10)
-                .onChange(of: stream.logLines.count) { _ in
-                    withAnimation(.easeOut(duration: 0.15)) {
-                        proxy.scrollTo("logBottom", anchor: .bottom)
-                    }
-                }
-            }
-            .accessibilityLabel("Diagnostic log output")
-            .accessibilityValue(statusText)
+                .accessibilityLabel("Diagnostic log output")
+                .accessibilityValue(statusText)
         }
         .background(.bar)
     }
 
-    // MARK: - Helpers
+    // MARK: - Bindings / profile helpers
 
-    private func labeledField<Content: View>(
-        _ title: String,
-        accessibility: String,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            content()
-                .accessibilityLabel(accessibility)
-        }
+    private func customProfileBinding(_ index: Int) -> Binding<UUID?> {
+        Binding(
+            get: {
+                let slots = settings.customSlots
+                guard index < slots.count else { return nil }
+                return slots[index].profileID
+            },
+            set: { settings.setCustomSlot(index: index, profileID: $0) }
+        )
     }
 
-    private var serialTrimmed: String {
-        settings.serial.trimmingCharacters(in: .whitespacesAndNewlines)
+    private func customChannelBinding(_ index: Int) -> Binding<String> {
+        Binding(
+            get: {
+                let slots = settings.customSlots
+                guard index < slots.count else { return "" }
+                return String(slots[index].channel)
+            },
+            set: { raw in
+                if let value = Int(raw.filter(\.isNumber)) {
+                    settings.setCustomSlot(index: index, channel: value)
+                }
+            }
+        )
+    }
+
+    // MARK: - Helpers
+
+    private var selectedSerialTrimmed: String {
+        settings.selectedProfile?.serial.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    private var selectedDeviceResult: DeviceLookupResult? {
+        guard let id = settings.selectedProfileID else { return nil }
+        return deviceResults[id]
     }
 
     private var canStart: Bool {
-        !settings.password.isEmpty
-            && !stream.isBusy
-            && (!serialTrimmed.isEmpty || device != nil)
-            && !settings.channelsToPlay.isEmpty
+        guard !pool.isBusy else { return false }
+        switch settings.viewMode {
+        case .device:
+            guard let profile = settings.selectedProfile else { return false }
+            return !settings.password(for: profile.id).isEmpty
+                && !selectedSerialTrimmed.isEmpty
+                && !settings.channelsToPlay.isEmpty
+        case .custom:
+            let slots = settings.validCustomSlots
+            guard !slots.isEmpty else { return false }
+            return slots.allSatisfy { slot in
+                slot.profileID.map { !settings.password(for: $0).isEmpty } ?? false
+            }
+        }
     }
 
     private var toolbarSubtitle: String {
-        let sn = settings.serial.trimmingCharacters(in: .whitespacesAndNewlines)
-        if sn.isEmpty { return "Configure device credentials to stream" }
-        let ch = settings.channelsToPlay.map(String.init).joined(separator: ", ")
-        let label = ch.isEmpty ? "none" : ch
-        return "\(sn)  ·  Play CH \(label)  ·  \(settings.streamMode.rawValue)"
+        switch settings.viewMode {
+        case .device:
+            guard let profile = settings.selectedProfile else { return "Add a camera profile to stream" }
+            let ch = settings.channelsToPlay.map(String.init).joined(separator: ", ")
+            let label = ch.isEmpty ? "none" : ch
+            return "\(profile.displayName)  ·  Play CH \(label)  ·  \(settings.streamMode.rawValue)"
+        case .custom:
+            return "Custom view  ·  \(settings.validCustomSlots.count) configured slot(s)  ·  \(settings.streamMode.rawValue)"
+        }
     }
 
     private var statusText: String {
         var lines = [statusMessage]
-        if !stream.logLines.isEmpty {
+        let logs = pool.mergedLogLines
+        if !logs.isEmpty {
             lines.append("")
-            lines.append(contentsOf: stream.logLines.suffix(80))
+            lines.append(contentsOf: logs.suffix(80))
         }
         return lines.joined(separator: "\n")
     }
@@ -541,34 +725,9 @@ struct ContentView: View {
         syncChannelDrafts()
     }
 
-    private func lookup() async {
-        isLookingUp = true
-        statusMessage = "Querying InstaOn…"
-        defer { isLookingUp = false }
-        do {
-            let result = try await client.lookupDevice(serial: serialTrimmed)
-            device = result
-            statusMessage = "Lookup OK — \(result.ipAddress) (RTSP \(result.rtspPort), P2P \(result.p2pPort))"
-        } catch {
-            device = nil
-            statusMessage = error.localizedDescription
-            if !settings.showLogs {
-                settings.showLogs = true
-            }
-        }
-    }
-
-    private func startStream() async {
-        commitChannelDrafts()
-        let channels = settings.channelsToPlay
-        guard !channels.isEmpty else {
-            statusMessage = "Check Play for at least one channel slot."
-            return
-        }
-
-        let sn = serialTrimmed
-        let target = device ?? DeviceLookupResult(
-            serial: sn,
+    private func lookupTarget(for profile: DeviceProfile) -> DeviceLookupResult {
+        deviceResults[profile.id] ?? DeviceLookupResult(
+            serial: profile.serial.trimmingCharacters(in: .whitespacesAndNewlines),
             ipAddress: "",
             p2pPort: 25001,
             httpPort: 80,
@@ -580,91 +739,251 @@ struct ContentView: View {
             softwareVersion: "",
             rawJSON: "{}"
         )
-        guard !target.serial.isEmpty else { return }
+    }
 
-        stream.mode = settings.streamMode
-        let preferred = focusedChannel.flatMap { channels.contains($0) ? $0 : nil } ?? channels.first
-        focusedChannel = preferred
+    private func lookup() async {
+        guard let profile = settings.selectedProfile else { return }
+        isLookingUp = true
+        statusMessage = "Querying InstaOn…"
+        defer { isLookingUp = false }
+        do {
+            let result = try await client.lookupDevice(serial: selectedSerialTrimmed)
+            deviceResults[profile.id] = result
+            statusMessage = "Lookup OK — \(result.ipAddress) (RTSP \(result.rtspPort), P2P \(result.p2pPort))"
+        } catch {
+            deviceResults[profile.id] = nil
+            statusMessage = error.localizedDescription
+            if !settings.showLogs {
+                settings.showLogs = true
+            }
+        }
+    }
+
+    private func startStream() async {
+        commitChannelDrafts()
+        switch settings.viewMode {
+        case .device:
+            await startSingleDevice()
+        case .custom:
+            await startCustomView()
+        }
+    }
+
+    private func startSingleDevice() async {
+        guard let profile = settings.selectedProfile else { return }
+        let channels = settings.channelsToPlay
+        guard !channels.isEmpty else {
+            statusMessage = "Check Play for at least one channel slot."
+            return
+        }
+
+        let engine = engineFor(profile)
+        engine.mode = settings.streamMode
+
+        // Per-slot Main/Sub overrides (grid position → slot subtype).
+        var channelSubtypes: [Int: Int] = [:]
+        let grid = settings.gridChannels
+        for channel in channels {
+            if let index = grid.firstIndex(of: channel) {
+                channelSubtypes[channel] = settings.slotSubtype(at: index)
+            }
+        }
+
+        let preferred: Int? = focusedSlot.flatMap { index in
+            slotMapping(index).map { $0.channel }
+        }.flatMap { channels.contains($0) ? $0 : nil } ?? channels.first
         statusMessage = "Starting \(settings.streamMode.rawValue) for \(channels.count) channel(s)…"
 
         let statusTask = Task { @MainActor in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 400_000_000)
-                switch stream.state {
+                switch engine.state {
                 case .tunneling:
                     statusMessage = "Opening P2P tunnel…"
                 case .probing(let url):
                     statusMessage = "Connecting stream… \(url)"
                 case .starting:
                     statusMessage = "Starting \(settings.streamMode.rawValue) for \(channels.count) channel(s)…"
-                case .playing, .failed, .idle:
+                case .playing, .failed, .idle, .off:
                     return
                 }
             }
         }
 
-        await stream.start(
-            device: target,
-            username: settings.username,
-            password: settings.password,
+        await engine.start(
+            device: lookupTarget(for: profile),
+            username: profile.username,
+            password: settings.password(for: profile.id),
             channels: channels,
             subtype: settings.subtype,
+            channelSubtypes: channelSubtypes,
             preferredChannel: preferred
         )
         statusTask.cancel()
+        updateStatusAfterStart()
+    }
 
-        switch stream.state {
-        case .playing:
-            let live = stream.cells.compactMap { cell -> Int? in
-                if case .playing = cell.state { return cell.channel }
-                return nil
+    private func startCustomView() async {
+        let slots = settings.validCustomSlots
+        guard !slots.isEmpty else {
+            statusMessage = "Configure at least one custom slot (device + channel)."
+            return
+        }
+
+        // Group slots per *physical device* (by serial): one engine/tunnel each,
+        // started in parallel. Two profiles with the same serial share one tunnel —
+        // a device allows only one P2P session.
+        var groups: [String: (profile: DeviceProfile, slots: [CustomSlot])] = [:]
+        for slot in slots {
+            guard let pid = slot.profileID, let profile = profileFor(pid) else { continue }
+            let key = StreamPool.serialKey(profile.serial, fallbackID: profile.id)
+            if groups[key] == nil {
+                groups[key] = (profile, [])
             }
-            let failed = stream.cells.compactMap { cell -> Int? in
-                if case .failed = cell.state { return cell.channel }
-                return nil
+            groups[key]!.slots.append(slot)
+        }
+
+        statusMessage = "Starting \(slots.count) channel(s) across \(groups.count) device(s)…"
+
+        // Start devices SEQUENTIALLY: the InstaOn cloud (and each device's
+        // single-session P2P channel) does not tolerate overlapping handshakes
+        // from the same client — concurrent starts made all tunnels time out.
+        // Channels still stream concurrently once every tunnel is up.
+        let ordered = groups.sorted(by: { $0.key < $1.key })
+        for (index, (_, group)) in ordered.enumerated() {
+            let engine = engineFor(group.profile)
+            engine.mode = settings.streamMode
+            let target = lookupTarget(for: group.profile)
+            let password = settings.password(for: group.profile.id)
+            statusMessage =
+                "Starting device \(index + 1)/\(ordered.count) (\(group.profile.displayName))…"
+
+            // One retry: relay handshakes are flaky by nature.
+            for attempt in 0...1 {
+                await engine.start(
+                    device: target,
+                    username: group.profile.username,
+                    password: password,
+                    channels: group.slots.map(\.channel),
+                    subtype: settings.subtype,
+                    channelSubtypes: Dictionary(
+                        group.slots.map { ($0.channel, $0.subtype) },
+                        uniquingKeysWith: { _, last in last }
+                    ),
+                    preferredChannel: group.slots.first?.channel
+                )
+                if engine.isPlaying { break }
+                if attempt == 0 {
+                    statusMessage = "Retrying device \(group.profile.displayName)…"
+                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                }
             }
-            if live.count > 1 {
-                statusMessage = "Playing \(live.count) channels: \(live.map(String.init).joined(separator: ", "))."
-            } else if let only = live.first {
-                statusMessage = "Playing channel \(only)."
-            } else {
-                statusMessage = "Playing."
-            }
+            // Let the cloud breathe before the next device's handshake.
+            try? await Task.sleep(nanoseconds: 500_000_000)
+        }
+        updateStatusAfterStart()
+    }
+
+    private func updateStatusAfterStart() {
+        let allCells = pool.engines.values.flatMap(\.cells)
+        let live = allCells.filter { if case .playing = $0.state { return true } else { return false } }
+        let failed = allCells.filter { if case .failed = $0.state { return true } else { return false } }
+
+        if !live.isEmpty {
+            statusMessage = "Playing \(live.count) channel(s)."
             if !failed.isEmpty {
-                statusMessage += " Failed: \(failed.map(String.init).joined(separator: ", ")) — use Restart on those tiles."
+                statusMessage += " \(failed.count) failed — use Restart on those tiles."
             }
-        case .failed(let message):
-            statusMessage = message
+        } else if let firstFailed = failed.first, case .failed(let msg) = firstFailed.state {
+            statusMessage = msg
             if !settings.showLogs {
                 settings.showLogs = true
             }
-        default:
-            break
         }
     }
 
-    private func selectChannel(_ channel: Int) async {
-        focusedChannel = channel
-        guard stream.canSwitchChannel else { return }
-        await stream.selectChannel(channel)
+    private func selectSlot(_ index: Int) async {
+        guard let mapping = slotMapping(index),
+              let profile = profileFor(mapping.profileID),
+              let engine = engineIfPresentFor(profile),
+              engine.canSwitchChannel else { return }
+        await engine.selectChannel(mapping.channel)
     }
 
-    private func restartChannel(_ channel: Int) async {
-        if !stream.canRestartChannels {
+    // MARK: - Stream (Main/Sub) change → live restart
+
+    /// Restart the slot's channel with the newly chosen stream, if a session is live.
+    private func restartSlotWithSubtype(_ index: Int, _ value: Int) {
+        guard let mapping = slotMapping(index),
+              let profile = profileFor(mapping.profileID),
+              let engine = engineIfPresentFor(profile),
+              engine.canRestartChannels else { return }
+        if settings.viewMode == .device && !settings.isSlotEnabled(index) { return }
+        let label = value == 0 ? "Main" : "Sub"
+        statusMessage = "Switching channel \(mapping.channel) to \(label)…"
+        Task { @MainActor in
+            await engine.restartChannel(mapping.channel, subtype: value)
+            if let cell = engine.cells.first(where: { $0.channel == mapping.channel }),
+               case .playing = cell.state {
+                statusMessage = "Channel \(mapping.channel) now playing \(label)."
+            } else {
+                statusMessage = "Channel \(mapping.channel) \(label) restart did not settle — use the tile restart button."
+            }
+        }
+    }
+
+    private func onSlotSubtypeChange(_ index: Int, _ value: Int) {
+        settings.setSlotSubtype(at: index, to: value)
+        restartSlotWithSubtype(index, value)
+    }
+
+    private func onCustomSlotSubtypeChange(_ index: Int, _ value: Int) {
+        settings.setCustomSlot(index: index, subtype: value)
+        restartSlotWithSubtype(index, value)
+    }
+
+    private func onAllStreamsChange(_ value: Int) {
+        settings.setAllSlotSubtypes(value)
+        // Restart every live channel of the selected device with the new stream.
+        guard let profile = settings.selectedProfile,
+              let engine = engineIfPresentFor(profile),
+              engine.canRestartChannels else { return }
+        let channels = engine.cells.map(\.channel)
+        guard !channels.isEmpty else { return }
+        let label = value == 0 ? "Main" : "Sub"
+        statusMessage = "Restarting \(channels.count) channel(s) with \(label)…"
+        Task { @MainActor in
+            var ok = 0
+            for channel in channels {
+                await engine.restartChannel(channel, subtype: value)
+                if let cell = engine.cells.first(where: { $0.channel == channel }),
+                   case .playing = cell.state {
+                    ok += 1
+                }
+            }
+            statusMessage = "Playing \(ok)/\(channels.count) channel(s) with \(label)."
+        }
+    }
+
+    private func restartSlot(_ index: Int) async {
+        guard let mapping = slotMapping(index),
+              let profile = profileFor(mapping.profileID),
+              let engine = engineIfPresentFor(profile) else { return }
+        guard engine.canRestartChannels else {
             statusMessage = "No live session — press Start first, then Restart failed tiles."
             return
         }
-        statusMessage = "Restarting channel \(channel)…"
-        await stream.restartChannel(channel)
-        if let cell = stream.cells.first(where: { $0.channel == channel }) {
+        statusMessage = "Restarting channel \(mapping.channel)…"
+        await engine.restartChannel(mapping.channel)
+        if let cell = engine.cells.first(where: { $0.channel == mapping.channel }) {
             switch cell.state {
             case .playing:
-                statusMessage = "Channel \(channel) playing again."
+                statusMessage = "Channel \(mapping.channel) playing again."
             case .failed(let message):
-                statusMessage = "Channel \(channel) restart failed: \(message)"
+                statusMessage = "Channel \(mapping.channel) restart failed: \(message)"
                 if !settings.showLogs { settings.showLogs = true }
             default:
-                statusMessage = "Channel \(channel) restart finished."
+                statusMessage = "Channel \(mapping.channel) restart finished."
             }
         }
     }

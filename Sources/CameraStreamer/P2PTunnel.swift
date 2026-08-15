@@ -9,6 +9,12 @@ enum StreamMode: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+/// Boxes a non-Sendable value so it can cross into a detached escalation task.
+private final class SendableBox<T>: @unchecked Sendable {
+    let value: T
+    init(_ value: T) { self.value = value }
+}
+
 /// Drains child-process pipes off the main thread.
 /// `FileHandle.availableData` blocks until bytes arrive — never call it on MainActor.
 private final class PipeDrain: @unchecked Sendable {
@@ -77,10 +83,15 @@ final class P2PTunnel {
         if process.isRunning {
             process.terminate()
         }
+        // Process is not Sendable; box it — only this detached task touches it now.
+        let box = SendableBox(process)
         Task.detached {
+            let process = box.value
             try? await Task.sleep(nanoseconds: 1_500_000_000)
             if process.isRunning {
-                process.interrupt()
+                // SIGINT is ignorable — a wedged tunnel would keep /p2p-channel held.
+                kill(process.processIdentifier, SIGKILL)
+                process.waitUntilExit()
             }
         }
     }
@@ -102,17 +113,61 @@ final class P2PTunnel {
             try? await Task.sleep(nanoseconds: 500_000_000)
         }
 
+        // The pre-bind free-port probe races with dh-p2p's own bind (TOCTOU) — if the
+        // port turns out to be taken, retry on the next free port instead of failing.
+        var startPort = preferredPort
+        var attemptsLeft = 3
+        let timeout: TimeInterval = cloud == "instaon_ctc" ? 18 : 40
+
+        while true {
+            localPort = await Self.firstFreePort(startingAt: startPort)
+            if localPort != preferredPort {
+                onLog?("Port \(preferredPort) busy — using 127.0.0.1:\(localPort)")
+            }
+
+            if try await startOnce(serial: serial, relay: relay, cloud: cloud, timeout: timeout) {
+                break
+            }
+
+            if attemptsLeft > 1 {
+                attemptsLeft -= 1
+                startPort = localPort + 1
+                onLog?("Bind failed on \(localPort) — retrying on the next free port")
+                continue
+            }
+            throw bindFailureError(cloud: cloud)
+        }
+
+        // Keep draining so the child never blocks on a full stdout pipe.
+        outputTask = Task { [weak self] in
+            while let self, !Task.isCancelled, self.process?.isRunning == true {
+                if let drain = self.drain {
+                    let chunk = drain.takeString()
+                    if !chunk.isEmpty {
+                        self.forwardInterestingLogs(chunk)
+                    }
+                }
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+        }
+
+        onLog?("P2P tunnel ready on 127.0.0.1:\(localPort) (\(cloud))")
+    }
+
+    /// One tunnel start attempt on `localPort`. Returns true when the tunnel is ready.
+    /// Throws for non-bind failures; returns false only for "address already in use".
+    private func startOnce(
+        serial: String,
+        relay: Bool,
+        cloud: String,
+        timeout: TimeInterval
+    ) async throws -> Bool {
         guard let binary = Self.resolveBinaryPath() else {
             throw NSError(
                 domain: "CameraStreamer",
                 code: 10,
                 userInfo: [NSLocalizedDescriptionKey: "dh-p2p binary not found in Vendor/"]
             )
-        }
-
-        localPort = await Self.firstFreePort(startingAt: preferredPort)
-        if localPort != preferredPort {
-            onLog?("Port \(preferredPort) busy — using 127.0.0.1:\(localPort)")
         }
 
         let process = Process()
@@ -137,8 +192,6 @@ final class P2PTunnel {
         process.standardOutput = stdout
         process.standardError = stderr
 
-        let timeout: TimeInterval = cloud == "instaon_ctc" ? 18 : 40
-
         onLog?("Starting dh-p2p cloud=\(cloud)\(relay ? " relay" : "") port=\(localPort)")
         onLog?("Tip: close gCMOB live view before connecting (phone holds /p2p-channel).")
         onLog?("Args: \(args.joined(separator: " "))")
@@ -151,44 +204,46 @@ final class P2PTunnel {
         self.process = process
 
         let (ready, lastLogs) = await waitForReady(drain: drain, process: process, timeout: timeout)
-        guard ready else {
-            let code = process.isRunning ? -1 : Int(process.terminationStatus)
-            stop()
-            var detail = "P2P tunnel not ready on cloud \(cloud) (exit \(code))."
-            let lower = lastLogs.lowercased()
-            if lower.contains("p2p-channel timed out")
-                || lower.contains("stuck on 100")
-                || lower.contains("waiting for p2p-channel")
-                || lower.contains("ptcp sync response missing")
-                || lower.contains("invalid ptcp magic")
-                || lower.contains("online/relay timed out")
-                || lower.contains("stale p2p") {
-                detail +=
-                    " Device did not complete P2P/PTCP — close live view in gCMOB, wait ~10s, retry. Avoid a second manual tunnel on the same SN."
-            } else if lower.contains("404 p2p-channel") {
-                detail += " Device not registered on P2P cloud — open live view once in gCMOB, then retry here."
-            } else if lower.contains("403 p2p-channel") {
-                detail += " Channel auth rejected."
-            }
-            throw NSError(
-                domain: "CameraStreamer",
-                code: 11,
-                userInfo: [NSLocalizedDescriptionKey: detail]
-            )
+        if ready {
+            return true
         }
 
-        // Keep draining so the child never blocks on a full stdout pipe.
-        outputTask = Task { [weak self] in
-            while let self, !Task.isCancelled, self.process?.isRunning == true {
-                let chunk = drain.takeString()
-                if !chunk.isEmpty {
-                    self.forwardInterestingLogs(chunk)
-                }
-                try? await Task.sleep(nanoseconds: 250_000_000)
-            }
+        let code = process.isRunning ? -1 : Int(process.terminationStatus)
+        stop()
+        let lower = lastLogs.lowercased()
+        if lower.contains("address already in use") {
+            return false // caller retries on the next free port
         }
 
-        onLog?("P2P tunnel ready on 127.0.0.1:\(localPort) (\(cloud))")
+        var detail = "P2P tunnel not ready on cloud \(cloud) (exit \(code))."
+        if lower.contains("p2p-channel timed out")
+            || lower.contains("stuck on 100")
+            || lower.contains("waiting for p2p-channel")
+            || lower.contains("ptcp sync response missing")
+            || lower.contains("invalid ptcp magic")
+            || lower.contains("online/relay timed out")
+            || lower.contains("stale p2p") {
+            detail +=
+                " Device did not complete P2P/PTCP — close live view in gCMOB, wait ~10s, retry. Avoid a second manual tunnel on the same SN."
+        } else if lower.contains("404 p2p-channel") {
+            detail += " Device not registered on P2P cloud — open live view once in gCMOB, then retry here."
+        } else if lower.contains("403 p2p-channel") {
+            detail += " Channel auth rejected."
+        }
+        throw NSError(
+            domain: "CameraStreamer",
+            code: 11,
+            userInfo: [NSLocalizedDescriptionKey: detail]
+        )
+    }
+
+    private func bindFailureError(cloud: String) -> Error {
+        NSError(
+            domain: "CameraStreamer",
+            code: 12,
+            userInfo: [NSLocalizedDescriptionKey:
+                "Could not bind any local port for the tunnel (cloud \(cloud)). Close other apps using ports \(preferredPort)-\(preferredPort + 29) and retry."]
+        )
     }
 
     private func waitForReady(
@@ -339,15 +394,11 @@ final class P2PTunnel {
                     || cmd.contains("dh-p2p --")
                     || cmd.contains("dh-p2p ")
                 guard isTunnel else { continue }
-                // Match this serial when present; also reap obviously-orphaned
-                // listeners that still hold a local tunnel port.
-                if cmd.contains(sn)
-                    || cmd.contains(":1554:")
-                    || cmd.contains(":1555:")
-                    || cmd.contains(":1556:")
-                    || cmd.contains(":1557:")
-                    || cmd.contains(":1558:")
-                {
+                // Match by serial ONLY: the custom view runs one tunnel per device,
+                // and port-based matching would kill another device's live tunnel.
+                // Ports are re-probed at bind time, so stale-port orphans are already
+                // handled as long as the serial matches.
+                if cmd.contains(sn) {
                     pids.insert(pid)
                 }
             }

@@ -8,54 +8,97 @@ struct SettingsView: View {
     var body: some View {
         Form {
             Section {
-                TextField("InstaOn / serial ID", text: $settings.serial)
-                    .textFieldStyle(.roundedBorder)
-                    .accessibilityLabel("Device serial or InstaOn ID")
-
-                TextField("Device username", text: $settings.username)
-                    .textFieldStyle(.roundedBorder)
-                    .accessibilityLabel("RTSP device username")
-
-                HStack(spacing: 8) {
-                    Group {
-                        if showPassword {
-                            TextField("Device password", text: $settings.password)
-                        } else {
-                            SecureField("Device password", text: $settings.password)
+                if settings.profiles.isEmpty {
+                    Text("No profiles yet — add one to save device credentials.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                ForEach(settings.profiles) { profile in
+                    HStack(spacing: 8) {
+                        Image(systemName: settings.selectedProfileID == profile.id
+                              ? "checkmark.circle.fill" : "circle")
+                            .foregroundStyle(settings.selectedProfileID == profile.id
+                                             ? Color.accentColor : Color.secondary)
+                            .accessibilityHidden(true)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(profile.displayName)
+                                .font(.callout.weight(.medium))
+                            Text(profile.serial.isEmpty ? "No serial" : profile.serial)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
                         }
+                        Spacer()
+                        Button(role: .destructive) {
+                            settings.removeProfile(profile.id)
+                        } label: {
+                            Image(systemName: "trash")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Delete profile and its saved password")
+                        .accessibilityLabel("Delete profile \(profile.displayName)")
                     }
-                    .textFieldStyle(.roundedBorder)
-                    .accessibilityLabel("RTSP device password")
-
-                    Toggle(isOn: $showPassword) {
-                        Image(systemName: showPassword ? "eye.slash" : "eye")
-                    }
-                    .toggleStyle(.button)
-                    .buttonStyle(.borderless)
-                    .help(showPassword ? "Hide password" : "Show password")
-                    .accessibilityLabel(showPassword ? "Hide password" : "Show password")
+                    .contentShape(Rectangle())
+                    .onTapGesture { settings.selectedProfileID = profile.id }
                 }
-
-                HStack {
-                    Button("Clear password") {
-                        settings.clearCredentials()
-                    }
-                    .disabled(settings.password.isEmpty)
-
-                    Spacer()
-
-                    if didSaveFlash {
-                        Label("Saved", systemImage: "checkmark.circle.fill")
-                            .foregroundStyle(.green)
-                            .font(.caption)
-                            .accessibilityLabel("Credentials saved")
-                    }
+                Button("Add Profile") {
+                    _ = settings.addProfile()
                 }
-                .padding(.top, 4)
+                .accessibilityLabel("Add device profile")
+                if didSaveFlash {
+                    Label("Saved", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                        .font(.caption)
+                        .accessibilityLabel("Settings saved")
+                }
             } header: {
-                Text("Device credentials")
+                Text("Device profiles")
             } footer: {
-                Text("Stored locally in this app’s preferences. Used for RTSP digest auth over the P2P tunnel. Passwords with @ are supported.")
+                Text("The checked profile is used in the Device live view. Passwords are stored in the macOS Keychain; everything else is stored locally.")
+            }
+
+            if let profileID = settings.selectedProfileID {
+                Section {
+                    TextField("Profile name", text: profileBinding(\.name, for: profileID))
+                        .textFieldStyle(.roundedBorder)
+                        .accessibilityLabel("Profile name")
+
+                    TextField("InstaOn / serial ID", text: profileBinding(\.serial, for: profileID))
+                        .textFieldStyle(.roundedBorder)
+                        .accessibilityLabel("Device serial or InstaOn ID")
+
+                    TextField("Device username", text: profileBinding(\.username, for: profileID))
+                        .textFieldStyle(.roundedBorder)
+                        .accessibilityLabel("RTSP device username")
+
+                    HStack(spacing: 8) {
+                        Group {
+                            if showPassword {
+                                TextField("Device password", text: passwordBinding(for: profileID))
+                            } else {
+                                SecureField("Device password", text: passwordBinding(for: profileID))
+                            }
+                        }
+                        .textFieldStyle(.roundedBorder)
+                        .accessibilityLabel("RTSP device password")
+
+                        Toggle(isOn: $showPassword) {
+                            Image(systemName: showPassword ? "eye.slash" : "eye")
+                        }
+                        .toggleStyle(.button)
+                        .buttonStyle(.borderless)
+                        .help(showPassword ? "Hide password" : "Show password")
+                        .accessibilityLabel(showPassword ? "Hide password" : "Show password")
+                    }
+
+                    Button("Clear password") {
+                        settings.setPassword("", for: profileID)
+                    }
+                    .disabled(settings.password(for: profileID).isEmpty)
+                } header: {
+                    Text("Selected profile")
+                } footer: {
+                    Text("Used for RTSP digest auth over the P2P tunnel. Passwords with @ are supported.")
+                }
             }
 
             Section {
@@ -79,6 +122,7 @@ struct SettingsView: View {
                 }
                 .onChange(of: settings.gridCapacity) { capacity in
                     settings.ensureChannelSlots(count: capacity)
+                    settings.ensureCustomSlots(count: capacity)
                 }
                 .accessibilityLabel("Multiview grid size")
 
@@ -89,7 +133,7 @@ struct SettingsView: View {
             }
 
             Section {
-                Text("Close gCMOB live view while streaming. Prefer Sub over P2P relay. One P2P tunnel is shared across multiview channels.")
+                Text("Close gCMOB live view while streaming. Prefer Sub over P2P relay. In Custom view each device gets its own tunnel.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -97,10 +141,34 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .padding()
-        .frame(minWidth: 420, minHeight: 360)
-        .onChange(of: settings.serial) { _ in flashSaved() }
-        .onChange(of: settings.username) { _ in flashSaved() }
-        .onChange(of: settings.password) { _ in flashSaved() }
+        .frame(minWidth: 420, minHeight: 460)
+        .onChange(of: settings.profiles) { _ in flashSaved() }
+        .onChange(of: settings.passwordRevision) { _ in flashSaved() }
+        .onChange(of: settings.selectedProfileID) { _ in flashSaved() }
+    }
+
+    private func profileBinding(
+        _ keyPath: WritableKeyPath<DeviceProfile, String>,
+        for id: UUID
+    ) -> Binding<String> {
+        Binding(
+            get: { settings.profiles.first { $0.id == id }?[keyPath: keyPath] ?? "" },
+            set: { newValue in
+                guard var profile = settings.profiles.first(where: { $0.id == id }) else { return }
+                profile[keyPath: keyPath] = newValue
+                settings.updateProfile(profile)
+            }
+        )
+    }
+
+    private func passwordBinding(for id: UUID) -> Binding<String> {
+        Binding(
+            get: {
+                _ = settings.passwordRevision
+                return settings.password(for: id)
+            },
+            set: { settings.setPassword($0, for: id) }
+        )
     }
 
     private func flashSaved() {

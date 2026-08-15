@@ -60,7 +60,7 @@ struct InstaOnClient {
     }
 
     private func parseLookupResponse(xml: String, fallbackSerial: String) throws -> DeviceLookupResult {
-        guard let returnPayload = firstMatch(pattern: "<return>([\\s\\S]*?)</return>", in: xml) else {
+        guard let returnPayload = firstMatch(pattern: "<return[^>]*>([\\s\\S]*?)</return>", in: xml) else {
             throw InstaOnClientError.parseFailed("missing <return>")
         }
 
